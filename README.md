@@ -1,6 +1,6 @@
-# Cloud Agent
+# Nimbus
 
-Cloud Agent is a from-scratch exploration of a cloud-native autonomous software
+Nimbus is a from-scratch exploration of a cloud-native autonomous software
 engineering agent, inspired by Harkirat Singh's *Build This Project to Get Hired
 in 2026* video. It is intentionally not a local coding CLI: users delegate work
 through a web product, while an isolated cloud workspace clones repositories,

@@ -1,4 +1,4 @@
-# Cloud-Native AI Agent — Implementation Plan
+# Nimbus — Implementation Plan
 
 ## Product Intent
 
