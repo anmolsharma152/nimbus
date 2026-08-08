@@ -6,6 +6,8 @@ in 2026* video. It is intentionally not a local coding CLI: users delegate work
 through a web product, while an isolated cloud workspace clones repositories,
 edits code, runs tests, uses a browser, and returns a reviewable pull request.
 
+**Engineered by [Anmol Sharma](https://linkedin.com/in/anmolsharma152)** | **[GitHub Profile](https://github.com/anmolsharma152)** | **[Live Portfolio](https://anmolsharma152.vercel.app)**
+
 The repository is in the architecture and validation stage; no product services
 have been implemented yet.
 
