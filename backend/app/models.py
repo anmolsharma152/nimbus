@@ -7,7 +7,7 @@ from .db import Base
 
 def utc_now():
     """Returns current UTC timestamp without timezone offset for naive DateTime columns."""
-    return datetime.datetime.now(datetime.timezone.utc)
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
 
 class TaskStatus(str, enum.Enum):
