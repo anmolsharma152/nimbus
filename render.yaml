@@ -14,10 +14,7 @@ services:
           name: nimbus-db
           property: connectionString
       - key: REDIS_URL
-        fromService:
-          type: redis
-          name: nimbus-redis
-          property: connectionString
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: GITHUB_TOKEN
@@ -40,10 +37,7 @@ services:
           name: nimbus-db
           property: connectionString
       - key: REDIS_URL
-        fromService:
-          type: redis
-          name: nimbus-redis
-          property: connectionString
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: GITHUB_TOKEN
@@ -57,9 +51,3 @@ databases:
     plan: free
     databaseName: nimbus_db
     user: nimbus_user
-
-redis:
-  # 4. Redis Service
-  - name: nimbus-redis
-    plan: free
-    ipAllowList: []
