@@ -34,7 +34,7 @@ class Settings(BaseSettings):
         description="OpenRouter API key for Tier 3 tertiary agent fallback."
     )
     OPENROUTER_MODEL: str = Field(
-        default="google/gemma-4-31b-it:free",
+        default="cohere/north-mini-code:free",
         description="OpenRouter free model identifier (Tier 3)."
     )
     GITHUB_TOKEN: str | None = Field(

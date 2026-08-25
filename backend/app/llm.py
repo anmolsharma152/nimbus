@@ -151,7 +151,7 @@ class LLMChatSession:
         if not settings.OPENROUTER_API_KEY:
             raise ValueError("OPENROUTER_API_KEY is not configured.")
         
-        model = settings.OPENROUTER_MODEL or "google/gemma-4-31b-it:free"
+        model = settings.OPENROUTER_MODEL or "cohere/north-mini-code:free"
         headers_extra = {
             "HTTP-Referer": "https://nimbusagent.vercel.app",
             "X-Title": "Nimbus Cloud Agent",
