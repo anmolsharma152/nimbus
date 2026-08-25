@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import styles from "./page.module.css";
@@ -24,20 +24,65 @@ const PROMPT_PRESETS = [
   },
 ];
 
-const POPULAR_REPOS = [
-  "https://github.com/anmolsharma152/RecSys_RL",
-  "https://github.com/anmolsharma152/nimbus",
-  "https://github.com/anmolsharma152/CodexEngine",
-];
+interface GitHubRepo {
+  id: number;
+  name: string;
+  full_name: string;
+  html_url: string;
+  stargazers_count: number;
+  language: string | null;
+}
 
 export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [repoUrl, setRepoUrl] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const router = useRouter();
 
+  // Dynamic GitHub Repos State
+  const [ghUser, setGhUser] = useState("anmolsharma152");
+  const [customGhUser, setCustomGhUser] = useState("anmolsharma152");
+  const [isEditingUser, setIsEditingUser] = useState(false);
+  const [repos, setRepos] = useState<GitHubRepo[]>([]);
+  const [isLoadingRepos, setIsLoadingRepos] = useState(false);
+
+  const router = useRouter();
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
+
+  // Dynamically fetch live repositories from GitHub REST API
+  useEffect(() => {
+    let isMounted = true;
+    setIsLoadingRepos(true);
+
+    fetch(`https://api.github.com/users/${ghUser}/repos?sort=updated&per_page=6`)
+      .then((res) => {
+        if (!res.ok) throw new Error("Could not load GitHub repositories");
+        return res.json();
+      })
+      .then((data) => {
+        if (isMounted && Array.isArray(data)) {
+          setRepos(data);
+        }
+      })
+      .catch((err) => {
+        console.warn("GitHub fetch notice:", err);
+      })
+      .finally(() => {
+        if (isMounted) setIsLoadingRepos(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [ghUser]);
+
+  const handleFetchUserRepos = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (customGhUser.trim()) {
+      setGhUser(customGhUser.trim());
+      setIsEditingUser(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -102,20 +147,6 @@ export default function Home() {
           <p className={styles.subtitle}>
             Autonomous Cloud Software Engineer
           </p>
-
-          {/* Quick Prompt Presets */}
-          <div className={styles.presetsRow}>
-            {PROMPT_PRESETS.map((preset) => (
-              <button
-                key={preset.title}
-                type="button"
-                className={styles.presetBtn}
-                onClick={() => setPrompt(preset.prompt)}
-              >
-                {preset.title}
-              </button>
-            ))}
-          </div>
         </section>
 
         {/* Task Form Terminal Card */}
@@ -145,18 +176,59 @@ export default function Home() {
               }}
             />
 
-            {/* Target Repo Input with Quick Chips */}
+            {/* Target Repo Input with Dynamic GitHub Fetcher */}
             <div className={styles.repoSection}>
-              <div className={styles.repoChipsRow}>
-                <span className={styles.repoLabel}>Quick Repos:</span>
-                {POPULAR_REPOS.map((url) => (
+              <div className={styles.repoHeaderRow}>
+                <span className={styles.repoLabel}>
+                  🐙 Live GitHub Repos ({ghUser}):
+                </span>
+                <button
+                  type="button"
+                  className={styles.userToggleBtn}
+                  onClick={() => setIsEditingUser(!isEditingUser)}
+                >
+                  {isEditingUser ? "Close" : "Change User / Org"}
+                </button>
+              </div>
+
+              {isEditingUser && (
+                <div className={styles.userInputRow}>
+                  <input
+                    type="text"
+                    className={styles.userHandleInput}
+                    placeholder="GitHub username or org"
+                    value={customGhUser}
+                    onChange={(e) => setCustomGhUser(e.target.value)}
+                  />
                   <button
-                    key={url}
+                    type="button"
+                    className={styles.fetchBtn}
+                    onClick={handleFetchUserRepos}
+                  >
+                    Fetch
+                  </button>
+                </div>
+              )}
+
+              {/* Dynamic Repos Chips */}
+              <div className={styles.repoChipsRow}>
+                {isLoadingRepos && (
+                  <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", fontStyle: "italic" }}>
+                    Fetching repositories from GitHub...
+                  </span>
+                )}
+                {!isLoadingRepos && repos.length > 0 && repos.map((repo) => (
+                  <button
+                    key={repo.id}
                     type="button"
                     className={styles.repoChip}
-                    onClick={() => setRepoUrl(url)}
+                    onClick={() => setRepoUrl(repo.html_url)}
+                    title={`Click to target ${repo.full_name} (${repo.language || "Code"})`}
                   >
-                    {url.replace("https://github.com/", "")}
+                    <span>{repo.name}</span>
+                    {repo.stargazers_count > 0 && (
+                      <span style={{ color: "#fbbf24", fontSize: "0.7rem" }}>⭐{repo.stargazers_count}</span>
+                    )}
                   </button>
                 ))}
               </div>
@@ -191,17 +263,31 @@ export default function Home() {
           </div>
         </form>
 
-        {/* Minimal Clean Footer */}
-        <footer className={styles.footer}>
-          <span>Nimbus &copy; {new Date().getFullYear()}</span>
-          <div className={styles.footerLinks}>
-            <Link href="/architecture" className={styles.footerLink}>Architecture</Link>
-            <Link href="/security" className={styles.footerLink}>Security</Link>
-            <Link href="/about" className={styles.footerLink}>About Creator</Link>
-            <a href="https://github.com/anmolsharma152/nimbus" target="_blank" rel="noopener noreferrer" className={styles.footerLink}>GitHub</a>
-          </div>
-        </footer>
+        {/* Suggested Prompt Presets (Positioned Below Terminal Form) */}
+        <div className={styles.presetsRow}>
+          {PROMPT_PRESETS.map((preset) => (
+            <button
+              key={preset.title}
+              type="button"
+              className={styles.presetBtn}
+              onClick={() => setPrompt(preset.prompt)}
+            >
+              {preset.title}
+            </button>
+          ))}
+        </div>
       </div>
+
+      {/* Minimal Clean Footer (Pinned to Bottom) */}
+      <footer className={styles.footer}>
+        <span>Nimbus &copy; {new Date().getFullYear()}</span>
+        <div className={styles.footerLinks}>
+          <Link href="/architecture" className={styles.footerLink}>Architecture</Link>
+          <Link href="/security" className={styles.footerLink}>Security</Link>
+          <Link href="/about" className={styles.footerLink}>About Creator</Link>
+          <a href="https://github.com/anmolsharma152/nimbus" target="_blank" rel="noopener noreferrer" className={styles.footerLink}>GitHub</a>
+        </div>
+      </footer>
     </main>
   );
 }

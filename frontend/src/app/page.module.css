@@ -1,18 +1,22 @@
 .main {
   min-height: 100vh;
-  padding: 48px 24px 80px 24px;
-  background: radial-gradient(circle at 50% -10%, rgba(99, 102, 241, 0.12) 0%, transparent 60%);
   display: flex;
   flex-direction: column;
+  justify-content: space-between;
   align-items: center;
+  padding: 48px 24px 24px 24px;
+  background: radial-gradient(circle at 50% 0%, rgba(99, 102, 241, 0.12) 0%, transparent 60%);
+  box-sizing: border-box;
 }
 
 .contentWrapper {
   width: 100%;
-  max-width: 920px;
+  max-width: 820px;
   display: flex;
   flex-direction: column;
   align-items: center;
+  margin: auto 0;
+  padding: 20px 0;
 }
 
 .hero {
@@ -21,30 +25,7 @@
   flex-direction: column;
   align-items: center;
   text-align: center;
-  margin-bottom: 32px;
-}
-
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid var(--surface-border);
-  padding: 6px 14px;
-  border-radius: 9999px;
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: #c7d2fe;
-  margin-bottom: 20px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-}
-
-.badgeDot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #10b981;
-  box-shadow: 0 0 8px #10b981;
+  margin-bottom: 28px;
 }
 
 .brandLogo {
@@ -52,17 +33,17 @@
   align-items: center;
   justify-content: center;
   gap: 14px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 
 .cloudSvg {
-  width: 48px;
-  height: 48px;
-  filter: drop-shadow(0 0 16px rgba(255, 255, 255, 0.45));
+  width: 46px;
+  height: 46px;
+  filter: drop-shadow(0 0 16px rgba(255, 255, 255, 0.5));
 }
 
 .brandTitle {
-  font-size: 3rem;
+  font-size: 2.8rem;
   font-weight: 800;
   letter-spacing: -0.04em;
   color: #ffffff;
@@ -70,45 +51,16 @@
 }
 
 .subtitle {
-  font-size: 1.2rem;
+  font-size: 1.15rem;
   color: #9ca3af;
-  max-width: 640px;
-  line-height: 1.6;
-  margin: 0 0 28px 0;
-}
-
-.presetsRow {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: center;
-  margin-bottom: 24px;
-  max-width: 720px;
-}
-
-.presetBtn {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--surface-border);
-  border-radius: 9999px;
-  padding: 6px 14px;
-  color: #e5e7eb;
-  font-size: 0.82rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.presetBtn:hover {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: rgba(99, 102, 241, 0.5);
-  color: #ffffff;
-  transform: translateY(-1px);
+  max-width: 580px;
+  line-height: 1.5;
+  margin: 0;
 }
 
 .form {
   width: 100%;
-  max-width: 780px;
-  margin-bottom: 48px;
+  margin-bottom: 20px;
 }
 
 .terminalCard {
@@ -167,6 +119,7 @@
   color: #ffffff;
   font-family: inherit;
   outline: none;
+  box-sizing: border-box;
 }
 
 .repoSection {
@@ -175,34 +128,88 @@
   background: rgba(0, 0, 0, 0.15);
 }
 
-.repoChipsRow {
+.repoHeaderRow {
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: space-between;
   margin-bottom: 8px;
   flex-wrap: wrap;
+  gap: 8px;
 }
 
 .repoLabel {
   font-size: 0.75rem;
   color: var(--text-muted);
   font-family: var(--font-geist-mono), monospace;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.userToggleBtn {
+  background: transparent;
+  border: none;
+  color: #818cf8;
+  font-size: 0.72rem;
+  font-family: var(--font-geist-mono), monospace;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.userInputRow {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.userHandleInput {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  color: #ffffff;
+  font-size: 0.75rem;
+  font-family: var(--font-geist-mono), monospace;
+  outline: none;
+}
+
+.fetchBtn {
+  background: rgba(99, 102, 241, 0.2);
+  border: 1px solid rgba(99, 102, 241, 0.4);
+  color: #c7d2fe;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.repoChipsRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
 }
 
 .repoChip {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid var(--surface-border);
   border-radius: 6px;
-  padding: 3px 8px;
+  padding: 4px 9px;
   font-size: 0.75rem;
   color: #93c5fd;
   font-family: var(--font-geist-mono), monospace;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   transition: all 0.15s ease;
 }
 
 .repoChip:hover {
-  background: rgba(99, 102, 241, 0.2);
+  background: rgba(99, 102, 241, 0.25);
   border-color: #818cf8;
   color: #ffffff;
 }
@@ -217,6 +224,7 @@
   font-size: 0.9rem;
   font-family: var(--font-geist-mono), monospace;
   outline: none;
+  box-sizing: border-box;
   transition: border-color 0.2s ease;
 }
 
@@ -277,76 +285,47 @@
   cursor: not-allowed;
 }
 
-/* Feature Grid */
-.sectionTitle {
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: #ffffff;
-  margin: 0 0 8px 0;
-  text-align: center;
-}
-
-.sectionSubtitle {
-  font-size: 0.95rem;
-  color: var(--text-muted);
-  margin: 0 0 28px 0;
-  text-align: center;
-}
-
-.featuresGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 16px;
-  width: 100%;
+/* Prompt Presets Row (Positioned below the terminal card) */
+.presetsRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 16px;
   max-width: 780px;
-  margin-bottom: 40px;
 }
 
-.featureCard {
-  background: rgba(18, 18, 26, 0.6);
-  backdrop-filter: blur(12px);
+.presetBtn {
+  background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--surface-border);
-  border-radius: 12px;
-  padding: 20px;
+  border-radius: 9999px;
+  padding: 6px 14px;
+  color: #e5e7eb;
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
   transition: all 0.2s ease;
 }
 
-.featureCard:hover {
-  border-color: rgba(99, 102, 241, 0.4);
-  transform: translateY(-2px);
-}
-
-.featureIcon {
-  font-size: 1.6rem;
-  margin-bottom: 10px;
-}
-
-.featureHeading {
-  font-size: 1.05rem;
-  font-weight: 700;
+.presetBtn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(99, 102, 241, 0.5);
   color: #ffffff;
-  margin: 0 0 6px 0;
+  transform: translateY(-1px);
 }
 
-.featureDesc {
-  font-size: 0.85rem;
-  color: #9ca3af;
-  line-height: 1.5;
-  margin: 0;
-}
-
-/* Footer */
+/* Footer (Clean pinned to bottom) */
 .footer {
   width: 100%;
-  max-width: 780px;
+  max-width: 820px;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding-top: 24px;
+  padding-top: 20px;
   border-top: 1px solid var(--surface-border);
   font-size: 0.82rem;
   color: var(--text-muted);
-  margin-top: 20px;
+  margin-top: auto;
   flex-wrap: wrap;
   gap: 12px;
 }

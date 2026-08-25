@@ -1,7 +1,6 @@
 import React from "react";
 import Link from "next/link";
 import styles from "./security.module.css";
-import MakerCard from "../../components/MakerCard";
 
 export const metadata = {
   title: "Security & Zero-Trust Isolation Architecture | Nimbus",
@@ -66,9 +65,6 @@ export default function SecurityPage() {
             </p>
           </div>
         </div>
-
-        {/* Maker attribution */}
-        <MakerCard />
       </div>
     </main>
   );
