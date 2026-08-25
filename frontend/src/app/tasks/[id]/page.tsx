@@ -29,11 +29,12 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
   const [showDiff, setShowDiff] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-  const wsBase = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
+  const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
+  const wsBase = process.env.NEXT_PUBLIC_WS_URL || apiBase.replace(/^http/, "ws");
 
-  // Fetch initial task details
+  // Fetch initial task details & historical events
   useEffect(() => {
+    // 1. Fetch task details
     fetch(`${apiBase}/api/tasks/${id}`)
       .then((res) => {
         if (!res.ok) throw new Error("Task not found");
@@ -41,33 +42,50 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
       })
       .then((data) => setTask(data))
       .catch((err) => console.error("Failed to fetch task", err));
+
+    // 2. Fetch all recorded events
+    fetch(`${apiBase}/api/tasks/${id}/events`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data) => {
+        if (Array.isArray(data) && data.length > 0) {
+          setEvents(data);
+        }
+      })
+      .catch((err) => console.error("Failed to fetch task events", err));
   }, [id, apiBase]);
 
-  // Connect WebSocket
+  // Connect WebSocket for live streaming updates
   useEffect(() => {
-    const ws = new WebSocket(`${wsBase}/ws/tasks/${id}`);
-    
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === "status") {
-          const parsed = typeof data.payload === "string" ? JSON.parse(data.payload) : data.payload;
-          setTask((prev) => prev ? { ...prev, status: parsed.status } : null);
-          // Refresh full task to get patch/PR if completed
-          if (parsed.status === "completed" || parsed.status === "failed") {
-            fetch(`${apiBase}/api/tasks/${id}`)
-              .then((res) => res.json())
-              .then((d) => setTask(d))
-              .catch(() => {});
+    let ws: WebSocket | null = null;
+    try {
+      ws = new WebSocket(`${wsBase}/ws/tasks/${id}`);
+      
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "status") {
+            const parsed = typeof data.payload === "string" ? JSON.parse(data.payload) : data.payload;
+            setTask((prev) => prev ? { ...prev, status: parsed.status } : null);
+            // Refresh full task to get patch/PR if completed
+            if (parsed.status === "completed" || parsed.status === "failed") {
+              fetch(`${apiBase}/api/tasks/${id}`)
+                .then((res) => res.json())
+                .then((d) => setTask(d))
+                .catch(() => {});
+            }
           }
+          setEvents((prev) => [...prev, data]);
+        } catch (err) {
+          console.error("Failed to parse WS message", err);
         }
-        setEvents((prev) => [...prev, data]);
-      } catch (err) {
-        console.error("Failed to parse WS message", err);
-      }
-    };
+      };
+    } catch (wsErr) {
+      console.warn("WebSocket connection notice:", wsErr);
+    }
 
-    return () => ws.close();
+    return () => {
+      if (ws) ws.close();
+    };
   }, [id, apiBase, wsBase]);
 
   // Auto-scroll to bottom of events
@@ -179,6 +197,11 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
             </div>
             
             <div className={styles.terminalBody}>
+              {events.length === 0 && (
+                <div style={{ color: "var(--text-muted)", fontSize: "0.85rem", fontStyle: "italic", padding: "12px 0" }}>
+                  Waiting for agent output...
+                </div>
+              )}
               {events.map((ev, idx) => {
                 let parsed: any = {};
                 try {
@@ -187,20 +210,21 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
                   parsed = { message: String(ev.payload) };
                 }
 
-                if (ev.type === "log" || ev.type === "status") {
+                const evType = (ev.type || "").toLowerCase();
+                if (evType === "log" || evType === "status") {
                   return (
                     <div key={idx} className={styles.logLine}>
                       <span className={styles.timestamp}>{new Date(ev.timestamp).toLocaleTimeString()}</span>
                       <span className={styles.logText}>{parsed.message || `Status changed to ${parsed.status}`}</span>
                     </div>
                   );
-                } else if (ev.type === "command") {
+                } else if (evType === "command") {
                   return (
                     <div key={idx} className={styles.commandLine}>
                       <span className={styles.prompt}>$</span> {parsed.command}
                     </div>
                   );
-                } else if (ev.type === "result") {
+                } else if (evType === "result") {
                   return (
                     <div key={idx} className={styles.resultLine}>
                       {parsed.output}

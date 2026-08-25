@@ -160,6 +160,20 @@ async def get_task(task_id: int, db: AsyncSession = Depends(get_db)):
         patch_diff=task.patch_diff
     )
 
+@app.get("/api/tasks/{task_id}/events")
+async def get_task_events(task_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(TaskEvent).where(TaskEvent.task_id == task_id).order_by(TaskEvent.created_at))
+    events = result.scalars().all()
+    return [
+        {
+            "id": ev.id,
+            "type": str(ev.event_type.value).lower() if hasattr(ev.event_type, "value") else str(ev.event_type).lower(),
+            "payload": ev.payload,
+            "timestamp": ev.created_at.isoformat()
+        }
+        for ev in events
+    ]
+
 @app.post("/api/tasks/{task_id}/cancel", response_model=TaskCancelResponse)
 async def cancel_task(task_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Task).where(Task.id == task_id))
