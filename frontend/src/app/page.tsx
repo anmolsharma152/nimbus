@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import styles from "./page.module.css";
+import SettingsModal from "../components/SettingsModal";
 
 const PROMPT_PRESETS = [
   {
@@ -31,6 +32,7 @@ interface GitHubRepo {
   html_url: string;
   stargazers_count: number;
   language: string | null;
+  description: string | null;
 }
 
 export default function Home() {
@@ -45,16 +47,20 @@ export default function Home() {
   const [isEditingUser, setIsEditingUser] = useState(false);
   const [repos, setRepos] = useState<GitHubRepo[]>([]);
   const [isLoadingRepos, setIsLoadingRepos] = useState(false);
+  const [repoSearchFilter, setRepoSearchFilter] = useState("");
+
+  // Settings Modal State
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   const router = useRouter();
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
 
-  // Dynamically fetch live repositories from GitHub REST API
+  // Dynamically fetch up to 100 repositories from GitHub REST API
   useEffect(() => {
     let isMounted = true;
     setIsLoadingRepos(true);
 
-    fetch(`https://api.github.com/users/${ghUser}/repos?sort=updated&per_page=6`)
+    fetch(`https://api.github.com/users/${ghUser}/repos?sort=updated&per_page=100`)
       .then((res) => {
         if (!res.ok) throw new Error("Could not load GitHub repositories");
         return res.json();
@@ -117,6 +123,11 @@ export default function Home() {
     }
   };
 
+  const filteredRepos = repos.filter((r) =>
+    r.name.toLowerCase().includes(repoSearchFilter.toLowerCase()) ||
+    (r.description && r.description.toLowerCase().includes(repoSearchFilter.toLowerCase()))
+  );
+
   return (
     <main className={styles.main}>
       <div className={styles.contentWrapper}>
@@ -159,7 +170,25 @@ export default function Home() {
                 <span className={`${styles.dot} ${styles.dotGreen}`} />
               </div>
               <span className={styles.terminalTitle}>agent-control-plane // prompt-input</span>
-              <span style={{ fontSize: "0.75rem", color: "#818cf8", fontFamily: "monospace" }}>3-Tier LLM</span>
+              <button
+                type="button"
+                onClick={() => setIsSettingsOpen(true)}
+                style={{
+                  background: "rgba(99, 102, 241, 0.15)",
+                  border: "1px solid rgba(99, 102, 241, 0.35)",
+                  color: "#c7d2fe",
+                  fontSize: "0.72rem",
+                  padding: "2px 8px",
+                  borderRadius: "4px",
+                  cursor: "pointer",
+                  fontFamily: "var(--font-geist-mono), monospace",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "4px"
+                }}
+              >
+                ⚙️ Configure Models &amp; PAT
+              </button>
             </div>
 
             {/* High-Contrast Prompt Input Container */}
@@ -186,18 +215,18 @@ export default function Home() {
               />
             </div>
 
-            {/* High-Contrast Target Repo Input with Dynamic GitHub Fetcher */}
+            {/* High-Contrast Target Repo Input with Complete Dropdown Menu */}
             <div className={styles.repoSection}>
               <div className={styles.repoHeaderRow}>
                 <span className={styles.repoLabel}>
-                  🐙 Target Repository (Live repos for {ghUser}):
+                  🐙 Select Repository (Fetched for {ghUser} • {repos.length} repos):
                 </span>
                 <button
                   type="button"
                   className={styles.userToggleBtn}
                   onClick={() => setIsEditingUser(!isEditingUser)}
                 >
-                  {isEditingUser ? "Close Search" : "Change User / Org"}
+                  {isEditingUser ? "Close User Search" : "Change User / Org"}
                 </button>
               </div>
 
@@ -215,25 +244,43 @@ export default function Home() {
                     className={styles.fetchBtn}
                     onClick={handleFetchUserRepos}
                   >
-                    Fetch
+                    Fetch All Repos
                   </button>
                 </div>
               )}
 
-              {/* Dynamic Repos Chips */}
+              {/* Complete Repository Dropdown Select */}
+              <div style={{ marginBottom: "10px" }}>
+                <select
+                  className={styles.repoInput}
+                  style={{ cursor: "pointer", background: "#0b0c15", padding: "10px 12px", marginBottom: "8px" }}
+                  value={repoUrl}
+                  onChange={(e) => setRepoUrl(e.target.value)}
+                >
+                  <option value="">-- Choose from {repos.length} repositories of @{ghUser} --</option>
+                  {repos.map((repo) => (
+                    <option key={repo.id} value={repo.html_url}>
+                      {repo.name} {repo.language ? `[${repo.language}]` : ""} {repo.stargazers_count > 0 ? `(⭐${repo.stargazers_count})` : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Quick 5 Recent Chips */}
               <div className={styles.repoChipsRow}>
+                <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", marginRight: "4px" }}>Recent:</span>
                 {isLoadingRepos && (
                   <span style={{ fontSize: "0.75rem", color: "#a1a1aa", fontStyle: "italic" }}>
                     Fetching repositories from GitHub...
                   </span>
                 )}
-                {!isLoadingRepos && repos.length > 0 && repos.map((repo) => (
+                {!isLoadingRepos && repos.slice(0, 5).map((repo) => (
                   <button
                     key={repo.id}
                     type="button"
                     className={styles.repoChip}
                     onClick={() => setRepoUrl(repo.html_url)}
-                    title={`Click to target ${repo.full_name} (${repo.language || "Code"})`}
+                    title={`Click to target ${repo.full_name}`}
                   >
                     <span>{repo.name}</span>
                     {repo.stargazers_count > 0 && (
@@ -243,10 +290,11 @@ export default function Home() {
                 ))}
               </div>
 
+              {/* Direct GitHub URL Text Input (Allows pasting private/custom URLs) */}
               <input
                 type="text"
                 className={styles.repoInput}
-                placeholder="Target GitHub Repo URL (e.g. https://github.com/owner/repo)"
+                placeholder="Or type/paste any custom or private repo URL (e.g. https://github.com/owner/repo)"
                 value={repoUrl}
                 onChange={(e) => setRepoUrl(e.target.value)}
               />
@@ -260,7 +308,7 @@ export default function Home() {
 
             <div className={styles.actionsRow}>
               <span className={styles.sandboxHint}>
-                🔒 <strong>Zero-Trust Sandbox:</strong> Clones into ephemeral container &amp; opens Draft PR.
+                🔒 <strong>Zero-Trust Sandbox:</strong> Works on Public &amp; Private repos with PAT.
               </span>
               <button
                 type="submit"
@@ -292,12 +340,21 @@ export default function Home() {
       <footer className={styles.footer}>
         <span>Nimbus &copy; {new Date().getFullYear()}</span>
         <div className={styles.footerLinks}>
+          <button
+            onClick={() => setIsSettingsOpen(true)}
+            style={{ background: "transparent", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: "0.82rem", padding: 0 }}
+          >
+            ⚙️ Provider Settings
+          </button>
           <Link href="/architecture" className={styles.footerLink}>Architecture</Link>
           <Link href="/security" className={styles.footerLink}>Security</Link>
           <Link href="/about" className={styles.footerLink}>About Creator</Link>
           <a href="https://github.com/anmolsharma152/nimbus" target="_blank" rel="noopener noreferrer" className={styles.footerLink}>GitHub</a>
         </div>
       </footer>
+
+      {/* Settings Modal */}
+      <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
     </main>
   );
 }
