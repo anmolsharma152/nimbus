@@ -40,7 +40,7 @@ class LLMChatSession:
         if settings.GEMINI_API_KEY:
             try:
                 self._gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
-                model_name = settings.GEMINI_MODEL or "gemini-2.5-flash"
+                model_name = settings.GEMINI_MODEL or "gemini-3.6-flash"
                 self._gemini_chat = self._gemini_client.aio.chats.create(
                     model=model_name,
                     config=types.GenerateContentConfig(

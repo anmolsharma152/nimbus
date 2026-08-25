@@ -18,7 +18,7 @@ class Settings(BaseSettings):
         description="Google Gemini API key for Tier 1 primary agent reasoning."
     )
     GEMINI_MODEL: str = Field(
-        default="gemini-2.5-flash",
+        default="gemini-3.6-flash",
         description="Gemini LLM model identifier (Tier 1)."
     )
     GROQ_API_KEY: str | None = Field(
