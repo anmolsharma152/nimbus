@@ -13,6 +13,7 @@ from .models import Task, TaskEvent, EventType, TaskStatus
 from .settings import settings
 from .workspace import DockerWorkspace
 from .github_client import create_draft_pr
+from .llm import LLMChatSession
 
 
 async def log_event(db: AsyncSession, task_id: int, event_type: EventType, payload_dict: dict):
@@ -47,14 +48,20 @@ async def run_agent_loop(
 ):
     print(f"Worker picked up task {task_id}: {prompt} (repo: {repo_url}, branch: {git_branch})")
     
-    if not settings.GEMINI_API_KEY:
-        print("GEMINI_API_KEY is not set. Aborting.")
+    has_any_llm_key = bool(settings.GEMINI_API_KEY or settings.GROQ_API_KEY or settings.OPENROUTER_API_KEY)
+    if not has_any_llm_key:
+        print("No LLM API keys configured (GEMINI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY). Aborting.")
         async with async_session() as db:
             task = await db.get(Task, task_id)
             if task:
                 task.status = TaskStatus.FAILED
                 await db.commit()
-                await log_event(db, task_id, EventType.LOG, {"message": "GEMINI_API_KEY is not set in environment."})
+                await log_event(
+                    db,
+                    task_id,
+                    EventType.LOG,
+                    {"message": "No LLM API keys configured in environment (GEMINI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY)."}
+                )
                 await log_event(db, task_id, EventType.STATUS, {"status": "failed"})
         return
 
@@ -90,11 +97,9 @@ async def run_agent_loop(
                 db,
                 task_id,
                 EventType.LOG,
-                {"message": "Docker workspace ready in /workspace/repo. Starting LLM loop..."}
+                {"message": "Docker workspace ready in /workspace/repo. Starting 3-tier LLM reasoning loop..."}
             )
 
-            client = genai.Client(api_key=settings.GEMINI_API_KEY)
-            
             system_instruction = (
                 "You are Nimbus, an autonomous cloud software engineer. You operate inside an isolated Linux workspace "
                 "with git, python3, and build tools pre-installed. The current working directory is /workspace/repo.\n\n"
@@ -110,13 +115,9 @@ async def run_agent_loop(
                 "- When finished, summarize your changes in clear markdown without emitting further JSON command blocks."
             )
 
-            model_name = settings.GEMINI_MODEL or "gemini-2.5-flash"
-            chat = client.aio.chats.create(
-                model=model_name,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=0.1
-                )
+            llm_session = LLMChatSession(
+                system_instruction=system_instruction,
+                temperature=0.1
             )
 
             # Agent Loop
@@ -135,8 +136,10 @@ async def run_agent_loop(
                     await log_event(db, task_id, EventType.LOG, {"message": "Task execution cancelled by user."})
                     return
 
-                response = await chat.send_message(current_prompt)
-                text = response.text or ""
+                async def handle_fallback_notice(msg: str):
+                    await log_event(db, task_id, EventType.LOG, {"message": msg})
+
+                text = await llm_session.send_message(current_prompt, on_fallback=handle_fallback_notice)
                 
                 # Check if LLM emitted a command block
                 if "```json" in text and "\"command\":" in text:

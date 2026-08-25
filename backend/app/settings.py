@@ -15,11 +15,27 @@ class Settings(BaseSettings):
     )
     GEMINI_API_KEY: str | None = Field(
         default=None,
-        description="Google Gemini API key for agent reasoning."
+        description="Google Gemini API key for Tier 1 primary agent reasoning."
     )
     GEMINI_MODEL: str = Field(
         default="gemini-2.5-flash",
-        description="Gemini LLM model identifier."
+        description="Gemini LLM model identifier (Tier 1)."
+    )
+    GROQ_API_KEY: str | None = Field(
+        default=None,
+        description="Groq API key for Tier 2 secondary agent fallback."
+    )
+    GROQ_MODEL: str = Field(
+        default="openai/gpt-oss-120b",
+        description="Groq clean model identifier (Tier 2)."
+    )
+    OPENROUTER_API_KEY: str | None = Field(
+        default=None,
+        description="OpenRouter API key for Tier 3 tertiary agent fallback."
+    )
+    OPENROUTER_MODEL: str = Field(
+        default="google/gemma-4-31b-it:free",
+        description="OpenRouter free model identifier (Tier 3)."
     )
     GITHUB_TOKEN: str | None = Field(
         default=None,

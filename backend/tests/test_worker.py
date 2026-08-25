@@ -35,6 +35,8 @@ async def test_run_agent_loop_missing_api_key():
     mock_db.commit = AsyncMock()
 
     with patch("app.worker.settings.GEMINI_API_KEY", None), \
+         patch("app.worker.settings.GROQ_API_KEY", None), \
+         patch("app.worker.settings.OPENROUTER_API_KEY", None), \
          patch("app.worker.async_session") as mock_session_ctx, \
          patch("app.worker.log_event", new_callable=AsyncMock) as mock_log:
         
