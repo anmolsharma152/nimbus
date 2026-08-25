@@ -27,6 +27,10 @@
 
 ## 🏛️ System Architecture
 
+<details>
+<summary><b>🔍 Click to expand: End-to-End Sequence Diagram</b></summary>
+<br>
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -76,9 +80,15 @@ sequenceDiagram
     API-->>UI: Render "View Draft PR" Button & Patch Diff Viewer
 ```
 
+</details>
+
 ---
 
 ## 🔒 Trust Boundaries & Security Isolation
+
+<details>
+<summary><b>🔍 Click to expand: Security & Trust Boundary Architecture</b></summary>
+<br>
 
 ```mermaid
 graph TD
@@ -111,9 +121,15 @@ graph TD
     Worker -->|Transient Auth Header| GitHub["GitHub API\n(Draft Pull Request)"]
 ```
 
+</details>
+
 ---
 
 ## ⚡ Task State Machine
+
+<details>
+<summary><b>🔍 Click to expand: Task Lifecycle State Machine</b></summary>
+<br>
 
 ```mermaid
 stateDiagram-v2
@@ -146,6 +162,8 @@ stateDiagram-v2
     FAILED --> [*]
     CANCELLED --> [*]
 ```
+
+</details>
 
 ---
 
