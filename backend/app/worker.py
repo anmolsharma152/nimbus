@@ -212,8 +212,29 @@ async def run_agent_loop(
         finally:
             await workspace.acleanup()
 
-# Setup arq settings
-redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
+def normalize_redis_url(url: Optional[str]) -> str:
+    """Sanitizes and normalizes Redis connection strings (handles quotes, cli snippets, empty strings)."""
+    if not url:
+        return "redis://localhost:6379/0"
+    
+    cleaned = url.strip().strip("'\"")
+    # If copied from `redis-cli -u rediss://...`
+    if "-u " in cleaned:
+        cleaned = cleaned.split("-u ")[-1].split(" ")[0].strip("'\"")
+    elif " " in cleaned:
+        for part in cleaned.split():
+            if part.startswith(("redis://", "rediss://")):
+                cleaned = part.strip("'\"")
+                break
+
+    if not cleaned.startswith(("redis://", "rediss://")):
+        return "redis://localhost:6379/0"
+    
+    return cleaned
+
+
+# Setup arq settings with sanitized Redis URL
+redis_settings = RedisSettings.from_dsn(normalize_redis_url(settings.REDIS_URL))
 
 async def enqueue_task(
     task_id: int,
@@ -221,9 +242,12 @@ async def enqueue_task(
     repo_url: Optional[str] = None,
     git_branch: Optional[str] = None
 ):
-    pool = await create_pool(redis_settings)
-    await pool.enqueue_job('run_agent_loop', task_id, prompt, repo_url, git_branch)
-    await pool.close()
+    try:
+        pool = await create_pool(redis_settings)
+        await pool.enqueue_job('run_agent_loop', task_id, prompt, repo_url, git_branch)
+        await pool.close()
+    except Exception as e:
+        print(f"Failed to enqueue task {task_id}: {e}")
 
 class WorkerSettings:
     functions = [run_agent_loop]

@@ -65,3 +65,15 @@ def test_command_json_extraction():
 
     invalid_output = "I have completed all the requested tasks!"
     assert extract_command(invalid_output) is None
+
+
+def test_normalize_redis_url():
+    from app.worker import normalize_redis_url
+
+    assert normalize_redis_url("") == "redis://localhost:6379/0"
+    assert normalize_redis_url("   ") == "redis://localhost:6379/0"
+    assert normalize_redis_url(None) == "redis://localhost:6379/0"
+    assert normalize_redis_url('"rediss://default:pass@us1.upstash.io:6379"') == "rediss://default:pass@us1.upstash.io:6379"
+    assert normalize_redis_url("'rediss://default:pass@us1.upstash.io:6379'") == "rediss://default:pass@us1.upstash.io:6379"
+    assert normalize_redis_url("redis-cli --tls -u rediss://default:pass@us1.upstash.io:6379") == "rediss://default:pass@us1.upstash.io:6379"
+    assert normalize_redis_url("https://invalid.com") == "redis://localhost:6379/0"
