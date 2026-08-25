@@ -129,7 +129,8 @@ async def run_agent_loop(
                 "Begin by listing files or inspecting the project structure."
             )
             max_iterations = settings.MAX_AGENT_ITERATIONS
-            
+            STALL_TIMEOUT_SECONDS = 300  # 5 minutes — if LLM doesn't respond, fail cleanly
+
             for iteration in range(max_iterations):
                 # Check for cancellation before turn
                 await db.refresh(task)
@@ -140,8 +141,19 @@ async def run_agent_loop(
                 async def handle_fallback_notice(msg: str):
                     await log_event(db, task_id, EventType.LOG, {"message": msg})
 
-                text = await llm_session.send_message(current_prompt, on_fallback=handle_fallback_notice)
-                
+                try:
+                    text = await asyncio.wait_for(
+                        llm_session.send_message(current_prompt, on_fallback=handle_fallback_notice),
+                        timeout=STALL_TIMEOUT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    timeout_msg = (
+                        f"Agent timed out: No LLM response received within {STALL_TIMEOUT_SECONDS // 60} minutes. "
+                        "All providers may be overloaded or rate-limited. Please retry the task later."
+                    )
+                    await log_event(db, task_id, EventType.LOG, {"message": timeout_msg})
+                    raise RuntimeError(timeout_msg)
+
                 # Check if LLM emitted a command block
                 if "```json" in text and "\"command\":" in text:
                     try:
