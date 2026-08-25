@@ -227,8 +227,14 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
           <Link href="/" className={styles.backButton}>← Back</Link>
           <div className={styles.taskId}>Task #{id}</div>
           {task?.git_branch && (
-            <span style={{ fontSize: "0.82rem", color: "#a5b4fc", fontFamily: "var(--font-geist-mono), monospace" }}>
-              🌱 {task.git_branch}
+            <span style={{ fontSize: "0.82rem", color: "#a5b4fc", fontFamily: "var(--font-geist-mono), monospace", display: "inline-flex", alignItems: "center", gap: "5px" }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="6" y1="3" x2="6" y2="15"></line>
+                <circle cx="18" cy="6" r="3"></circle>
+                <circle cx="6" cy="18" r="3"></circle>
+                <path d="M18 9a9 9 0 0 1-9 9"></path>
+              </svg>
+              {task.git_branch}
             </span>
           )}
         </div>
@@ -245,13 +251,16 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
                 fontSize: "0.8rem",
                 fontWeight: 600,
                 cursor: "pointer",
-                display: "flex",
+                display: "inline-flex",
                 alignItems: "center",
-                gap: "4px"
+                gap: "6px"
               }}
               title="Stop Agent Execution"
             >
-              ⏹ Stop Task
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="4" y="4" width="16" height="16" rx="2" />
+              </svg>
+              <span>Stop Task</span>
             </button>
           ) : (
             <button
@@ -265,13 +274,16 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
                 fontSize: "0.8rem",
                 fontWeight: 600,
                 cursor: "pointer",
-                display: "flex",
+                display: "inline-flex",
                 alignItems: "center",
-                gap: "4px"
+                gap: "6px"
               }}
               title="Retry / Restart this Task"
             >
-              🔄 Retry Task
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+              </svg>
+              <span>Retry Task</span>
             </button>
           )}
 
@@ -285,13 +297,17 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
               borderRadius: "6px",
               fontSize: "0.8rem",
               cursor: "pointer",
-              display: "flex",
+              display: "inline-flex",
               alignItems: "center",
-              gap: "4px"
+              gap: "6px"
             }}
             title="Delete this task record"
           >
-            🗑 Delete
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+            <span>Delete</span>
           </button>
 
           {task?.pr_url && (
@@ -300,9 +316,15 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
               target="_blank"
               rel="noopener noreferrer"
               className="premium-button"
-              style={{ padding: "6px 14px", fontSize: "0.85rem", textDecoration: "none" }}
+              style={{ padding: "6px 14px", fontSize: "0.85rem", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: "6px" }}
             >
-              🚀 View Draft PR
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="18" cy="18" r="3"></circle>
+                <circle cx="6" cy="6" r="3"></circle>
+                <path d="M13 6h3a2 2 0 0 1 2 2v7"></path>
+                <line x1="6" y1="9" x2="6" y2="21"></line>
+              </svg>
+              <span>View Draft PR</span>
             </a>
           )}
           <span className={`${styles.statusBadge} ${task?.status === 'running' ? styles.statusActive : ''}`}>
