@@ -9,20 +9,25 @@ import asyncio
 import datetime
 from contextlib import asynccontextmanager
 
-from .db import get_db
+from .db import get_db, engine, Base
 from .models import Task, TaskEvent, TaskStatus
 from .worker import enqueue_task
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle manager for startup and graceful shutdown of async resources."""
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception as e:
+        print(f"Database schema auto-creation notice: {e}")
     yield
 
 app = FastAPI(title="Nimbus Control Plane", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "https://nimbusagent.vercel.app", "*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
