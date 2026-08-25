@@ -30,16 +30,18 @@ class LLMChatSession:
         self.messages: List[Dict[str, str]] = [
             {"role": "system", "content": self.system_instruction}
         ]
-        # Active Gemini chat object if available
+        # Active Gemini client and chat objects
+        self._gemini_client: Optional[genai.Client] = None
         self._gemini_chat = None
         self._init_gemini_chat()
 
     def _init_gemini_chat(self):
+        """Initializes and holds a persistent reference to the Gemini API Client and Async Chat."""
         if settings.GEMINI_API_KEY:
             try:
-                client = genai.Client(api_key=settings.GEMINI_API_KEY)
+                self._gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
                 model_name = settings.GEMINI_MODEL or "gemini-2.5-flash"
-                self._gemini_chat = client.aio.chats.create(
+                self._gemini_chat = self._gemini_client.aio.chats.create(
                     model=model_name,
                     config=types.GenerateContentConfig(
                         system_instruction=self.system_instruction,
@@ -49,18 +51,36 @@ class LLMChatSession:
                 )
             except Exception as e:
                 print(f"[LLM Router] Failed to initialize Gemini chat: {e}")
+                self._gemini_client = None
                 self._gemini_chat = None
 
     async def _call_gemini(self, prompt: str) -> str:
-        """Tier 1: Google Gemini API."""
-        if not settings.GEMINI_API_KEY or not self._gemini_chat:
-            raise ValueError("GEMINI_API_KEY is not configured or Gemini chat client uninitialized.")
+        """Tier 1: Google Gemini API with automatic client lifecycle recovery."""
+        if not settings.GEMINI_API_KEY:
+            raise ValueError("GEMINI_API_KEY is not configured.")
         
-        response = await self._gemini_chat.send_message(prompt)
-        text = response.text or ""
-        if not text.strip():
-            raise RuntimeError("Gemini returned empty response.")
-        return text
+        if not self._gemini_chat or not self._gemini_client:
+            self._init_gemini_chat()
+            if not self._gemini_chat:
+                raise ValueError("Failed to initialize Gemini chat client.")
+
+        try:
+            response = await self._gemini_chat.send_message(prompt)
+            text = response.text or ""
+            if not text.strip():
+                raise RuntimeError("Gemini returned empty response.")
+            return text
+        except Exception as e:
+            # If client was closed, recreate once and retry
+            if "client has been closed" in str(e).lower():
+                print("[LLM Router] Gemini client connection was closed. Recreating chat session...")
+                self._init_gemini_chat()
+                if self._gemini_chat:
+                    response = await self._gemini_chat.send_message(prompt)
+                    text = response.text or ""
+                    if text.strip():
+                        return text
+            raise e
 
     async def _call_openai_compatible(
         self,
