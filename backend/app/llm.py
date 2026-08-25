@@ -34,14 +34,16 @@ class LLMChatSession:
         # Active Gemini client and chat objects
         self._gemini_client: Optional[genai.Client] = None
         self._gemini_chat = None
+        self._gemini_models = ["gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.5-flash", "gemini-flash-latest"]
+        self._current_model_idx = 0
         self._init_gemini_chat()
 
-    def _init_gemini_chat(self):
+    def _init_gemini_chat(self, model_override: Optional[str] = None):
         """Initializes and holds a persistent reference to the Gemini API Client and Async Chat."""
         if settings.GEMINI_API_KEY:
             try:
                 self._gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
-                model_name = settings.GEMINI_MODEL or "gemini-3.6-flash"
+                model_name = model_override or self._gemini_models[self._current_model_idx % len(self._gemini_models)]
                 self._gemini_chat = self._gemini_client.aio.chats.create(
                     model=model_name,
                     config=types.GenerateContentConfig(
@@ -56,7 +58,7 @@ class LLMChatSession:
                 self._gemini_chat = None
 
     async def _call_gemini(self, prompt: str) -> str:
-        """Tier 1: Google Gemini API with automatic client lifecycle recovery and transient retry."""
+        """Tier 1: Google Gemini API with intra-model fallback, lifecycle recovery, and retry."""
         if not settings.GEMINI_API_KEY:
             raise ValueError("GEMINI_API_KEY is not configured.")
         
@@ -83,11 +85,13 @@ class LLMChatSession:
                     self._init_gemini_chat()
                     continue
 
-                # If high demand spike (503) or rate limit (429), wait and retry with backoff
-                if "503" in err_str or "unavailable" in err_str or "429" in err_str or "demand" in err_str:
-                    backoff = attempt * 2.0
-                    print(f"[LLM Router] Gemini transient demand spike ({e}). Retrying in {backoff}s (attempt {attempt}/3)...")
-                    await asyncio.sleep(backoff)
+                # If quota exhausted (429) or demand spike (503), switch to another model in Gemini family
+                if "429" in err_str or "quota" in err_str or "503" in err_str or "unavailable" in err_str:
+                    self._current_model_idx = (self._current_model_idx + 1) % len(self._gemini_models)
+                    next_model = self._gemini_models[self._current_model_idx]
+                    print(f"[LLM Router] Gemini model failover ({e}) -> Trying intra-Gemini model '{next_model}' (attempt {attempt}/3)...")
+                    self._init_gemini_chat(model_override=next_model)
+                    await asyncio.sleep(1.0)
                     continue
                 
                 # For other errors, raise to allow fallback tiers
