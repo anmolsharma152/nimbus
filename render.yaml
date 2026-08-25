@@ -1,0 +1,63 @@
+services:
+  # 1. FastAPI Control Plane API
+  - type: web
+    name: nimbus-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    envVars:
+      - key: SERVICE_TYPE
+        value: web
+      - key: DATABASE_URL
+        fromDatabase:
+          name: nimbus-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: nimbus-redis
+          property: connectionString
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+
+  # 2. arq Background Worker
+  - type: worker
+    name: nimbus-worker
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    envVars:
+      - key: SERVICE_TYPE
+        value: worker
+      - key: DATABASE_URL
+        fromDatabase:
+          name: nimbus-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: nimbus-redis
+          property: connectionString
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+
+databases:
+  # 3. PostgreSQL Database
+  - name: nimbus-db
+    plan: free
+    databaseName: nimbus_db
+    user: nimbus_user
+
+  # 4. Redis Service
+  - name: nimbus-redis
+    plan: free
