@@ -126,6 +126,23 @@ async def create_task(req: TaskCreate, db: AsyncSession = Depends(get_db)):
         print(f"Error in create_task: {traceback.format_exc()}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=err_msg)
 
+@app.get("/api/tasks", response_model=list[TaskResponse])
+async def list_tasks(limit: int = 10, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Task).order_by(Task.created_at.desc()).limit(limit))
+    tasks = result.scalars().all()
+    return [
+        TaskResponse(
+            id=t.id,
+            status=str(t.status.value).lower() if hasattr(t.status, "value") else str(t.status).lower(),
+            prompt=t.prompt,
+            repo_url=t.repo_url,
+            git_branch=t.git_branch,
+            pr_url=t.pr_url,
+            patch_diff=t.patch_diff
+        )
+        for t in tasks
+    ]
+
 @app.get("/api/tasks/{task_id}", response_model=TaskResponse)
 async def get_task(task_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Task).where(Task.id == task_id))

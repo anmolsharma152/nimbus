@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import styles from "./page.module.css";
 
@@ -23,12 +23,34 @@ const PROMPT_PRESETS = [
   },
 ];
 
+interface RecentTask {
+  id: number;
+  prompt: string;
+  status: string;
+  repo_url?: string | null;
+  git_branch?: string | null;
+  pr_url?: string | null;
+}
+
 export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [repoUrl, setRepoUrl] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [recentTasks, setRecentTasks] = useState<RecentTask[]>([]);
   const router = useRouter();
+
+  const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
+
+  // Fetch recent tasks on mount
+  useEffect(() => {
+    fetch(`${apiBase}/api/tasks?limit=6`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data) => {
+        if (Array.isArray(data)) setRecentTasks(data);
+      })
+      .catch((err) => console.error("Failed to load recent tasks", err));
+  }, [apiBase]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -37,7 +59,6 @@ export default function Home() {
     setIsSubmitting(true);
     setErrorMessage(null);
 
-    const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
     try {
       const res = await fetch(`${apiBase}/api/tasks`, {
         method: "POST",
@@ -164,6 +185,60 @@ export default function Home() {
             </div>
           </div>
         </form>
+
+        {/* Recent Tasks List */}
+        {recentTasks.length > 0 && (
+          <div style={{ marginTop: "36px", width: "100%", maxWidth: "680px", textAlign: "left" }}>
+            <h3 style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginBottom: "12px", textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>
+              📋 Recent Agent Tasks
+            </h3>
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              {recentTasks.map((t) => (
+                <div
+                  key={t.id}
+                  onClick={() => router.push(`/tasks/${t.id}`)}
+                  className="glass-panel"
+                  style={{
+                    padding: "12px 16px",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    cursor: "pointer",
+                    transition: "all 0.2s ease",
+                    borderRadius: "8px"
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255, 255, 255, 0.08)")}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = "rgba(255, 255, 255, 0.03)")}
+                >
+                  <div style={{ display: "flex", flexDirection: "column", gap: "4px", overflow: "hidden", paddingRight: "12px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                      <span style={{ fontWeight: 600, fontSize: "0.9rem", color: "var(--foreground)" }}>Task #{t.id}</span>
+                      {t.repo_url && (
+                        <span style={{ fontSize: "0.75rem", color: "#a0a0ff", fontFamily: "monospace" }}>
+                          {t.repo_url.replace("https://github.com/", "")}
+                        </span>
+                      )}
+                    </div>
+                    <span style={{ fontSize: "0.82rem", color: "var(--text-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "450px" }}>
+                      {t.prompt}
+                    </span>
+                  </div>
+                  <span style={{
+                    fontSize: "0.72rem",
+                    padding: "4px 8px",
+                    borderRadius: "4px",
+                    textTransform: "uppercase",
+                    fontWeight: 600,
+                    background: t.status === "completed" ? "rgba(34, 197, 94, 0.15)" : t.status === "running" ? "rgba(59, 130, 246, 0.15)" : "rgba(234, 179, 8, 0.15)",
+                    color: t.status === "completed" ? "#86efac" : t.status === "running" ? "#93c5fd" : "#fde047"
+                  }}>
+                    {t.status}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </main>
   );

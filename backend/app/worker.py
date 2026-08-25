@@ -11,7 +11,7 @@ from google.genai import types
 from .db import async_session
 from .models import Task, TaskEvent, EventType, TaskStatus
 from .settings import settings
-from .workspace import DockerWorkspace
+from .workspace import UnifiedWorkspace
 from .github_client import create_draft_pr
 from .llm import LLMChatSession
 
@@ -25,18 +25,18 @@ async def log_event(db: AsyncSession, task_id: int, event_type: EventType, paylo
 
     # Post to the main API so it broadcasts via WebSockets
     try:
-        async with httpx.AsyncClient() as client:
+        api_base = settings.API_INTERNAL_URL or "http://localhost:8000"
+        async with httpx.AsyncClient(timeout=3.0) as client:
             await client.post(
-                f"http://localhost:8000/api/internal/tasks/{task_id}/events",
+                f"{api_base.rstrip('/')}/api/internal/tasks/{task_id}/events",
                 json={
                     "type": str(event_type.value).lower(),
                     "payload": json.dumps(payload_dict),
                     "timestamp": event.created_at.isoformat()
-                },
-                timeout=5.0
+                }
             )
     except Exception as e:
-        print(f"Failed to broadcast event: {e}")
+        print(f"Failed to broadcast event to API: {e}")
 
 
 async def run_agent_loop(
@@ -66,7 +66,7 @@ async def run_agent_loop(
         return
 
     branch_name = git_branch or f"nimbus/task-{task_id}"
-    workspace = DockerWorkspace(task_id=task_id)
+    workspace = UnifiedWorkspace(task_id=task_id)
     
     async with async_session() as db:
         task = await db.get(Task, task_id)
@@ -81,7 +81,7 @@ async def run_agent_loop(
             db,
             task_id,
             EventType.LOG,
-            {"message": f"Agent initialized. Setting up Docker workspace on branch '{branch_name}'..."}
+            {"message": f"Agent initialized. Provisioning isolated workspace on branch '{branch_name}'..."}
         )
 
         try:
@@ -245,12 +245,19 @@ async def enqueue_task(
     repo_url: Optional[str] = None,
     git_branch: Optional[str] = None
 ):
+    enqueued = False
     try:
         pool = await create_pool(redis_settings)
         await pool.enqueue_job('run_agent_loop', task_id, prompt, repo_url, git_branch)
         await pool.close()
+        enqueued = True
+        print(f"Task {task_id} enqueued to Redis queue.")
     except Exception as e:
-        print(f"Failed to enqueue task {task_id}: {e}")
+        print(f"Redis queue unavailable ({e}). Spawning in-process background worker task.")
+    
+    if not enqueued:
+        # Launch agent loop directly in async event loop background task
+        asyncio.create_task(run_agent_loop(None, task_id, prompt, repo_url, git_branch))
 
 class WorkerSettings:
     functions = [run_agent_loop]
