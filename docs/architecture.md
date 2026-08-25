@@ -12,14 +12,16 @@ terminal session.
 ```text
 Browser UI ↔ API / WebSocket gateway ↔ control plane ↔ agent orchestrator
                                       ↕                 ↕
-                           Postgres, queue, object store  workspace provider
-                                                          ↕
-                                     GitHub, shell, files, tests, browser tools
+                      Postgres (pgvector), queue, object store  workspace provider
+                                                        ↕
+                                   GitHub, shell, files, tests, browser tools
 ```
 
 The control plane is trusted. It owns identity, tenant membership, task state,
-policy, audit events, and credential brokering. A workspace is untrusted: it
-runs repository code and receives only task-scoped, short-lived credentials.
+policy, audit events, and credential brokering. The persistence layer uses
+Central PostgreSQL 16 with `pgvector` extension for relational data and vector
+embeddings. A workspace is untrusted: it runs repository code and receives only
+task-scoped, short-lived credentials.
 
 ## Core Components
 

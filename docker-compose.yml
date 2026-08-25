@@ -1,0 +1,12 @@
+# Nimbus Docker Compose - Centralized Infrastructure Configuration
+# Replaced standalone postgres/redis containers with shared homelab services.
+
+services:
+  # Nimbus control-plane application service connects to the central homelab database & cache:
+  # - PostgreSQL 16 + pgvector: postgres:5432 (or localhost:5434)
+  # - Redis Cache: redis:6379 (or localhost:6379)
+  # Database Name: nimbus_db
+
+networks:
+  homelab:
+    external: true

@@ -16,5 +16,12 @@ venv.bak/
 logs/
 *.log
 
+# Node / Frontend
+node_modules/
+.next/
+dist/
+build/
+npm-debug.log*
+
 # macOS
 .DS_Store
