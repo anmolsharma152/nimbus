@@ -22,11 +22,14 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 # Copy dependency configuration
 COPY pyproject.toml uv.lock ./
 
-# Install Python dependencies into virtual environment
-RUN uv sync --frozen --no-dev
+# Install Python dependencies into virtual environment (without project package for layer caching)
+RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy application source code and migrations
 COPY . /app/
+
+# Sync project package
+RUN uv sync --frozen --no-dev
 
 # Make entrypoint executable
 RUN chmod +x /app/entrypoint.sh 2>/dev/null || true
