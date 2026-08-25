@@ -1,5 +1,5 @@
 services:
-  # 1. FastAPI Control Plane API
+  # 1. FastAPI Control Plane API + arq Worker (Runs concurrently on Free Tier)
   - type: web
     name: nimbus-api
     runtime: docker
@@ -7,31 +7,6 @@ services:
     dockerContext: ./backend
     plan: free
     envVars:
-      - key: SERVICE_TYPE
-        value: web
-      - key: DATABASE_URL
-        fromDatabase:
-          name: nimbus-db
-          property: connectionString
-      - key: REDIS_URL
-        sync: false
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: GITHUB_TOKEN
-        sync: false
-      - key: GEMINI_MODEL
-        value: gemini-2.5-flash
-
-  # 2. arq Background Worker
-  - type: worker
-    name: nimbus-worker
-    runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    plan: free
-    envVars:
-      - key: SERVICE_TYPE
-        value: worker
       - key: DATABASE_URL
         fromDatabase:
           name: nimbus-db
@@ -46,7 +21,7 @@ services:
         value: gemini-2.5-flash
 
 databases:
-  # 3. PostgreSQL Database
+  # 2. PostgreSQL Database
   - name: nimbus-db
     plan: free
     databaseName: nimbus_db
