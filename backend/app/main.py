@@ -30,7 +30,8 @@ async def create_task(req: TaskCreate, db: AsyncSession = Depends(get_db)):
     task = Task(
         prompt=req.prompt,
         repo_url=req.repo_url,
-        git_branch=req.git_branch
+        git_branch=req.git_branch,
+        status=TaskStatus.PENDING
     )
     db.add(task)
     await db.commit()
@@ -39,9 +40,10 @@ async def create_task(req: TaskCreate, db: AsyncSession = Depends(get_db)):
     # Enqueue task to background worker
     await enqueue_task(task.id, req.prompt, req.repo_url, req.git_branch)
     
+    status_val = task.status.value if hasattr(task.status, "value") else str(task.status or "pending")
     return {
         "id": task.id,
-        "status": task.status.value,
+        "status": status_val,
         "repo_url": task.repo_url,
         "git_branch": task.git_branch
     }
