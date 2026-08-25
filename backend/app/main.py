@@ -13,7 +13,7 @@ import traceback
 from contextlib import asynccontextmanager
 
 from .db import get_db, engine, Base
-from .models import Task, TaskEvent, TaskStatus
+from .models import Task, TaskEvent, TaskStatus, EventType
 from .worker import enqueue_task
 
 @asynccontextmanager
@@ -196,6 +196,41 @@ async def cancel_task(task_id: int, db: AsyncSession = Depends(get_db)):
     await manager.broadcast_event(task_id, cancel_payload)
     
     return TaskCancelResponse(id=task.id, status="cancelled", message="Task cancelled successfully")
+
+@app.post("/api/tasks/{task_id}/retry")
+async def retry_task(task_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    
+    # Reset task state for fresh execution
+    task.status = TaskStatus.PENDING
+    task.patch_diff = None
+    task.pr_url = None
+    await db.commit()
+    
+    # Log restart event
+    retry_event = TaskEvent(
+        task_id=task.id,
+        event_type=EventType.LOG,
+        payload=json.dumps({"message": "🔄 Task restarted by user. Relaunching agent reasoning loop..."})
+    )
+    db.add(retry_event)
+    await db.commit()
+    
+    # Broadcast status change to live WebSockets
+    status_payload = {
+        "type": "status",
+        "payload": json.dumps({"status": "pending"}),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    }
+    await manager.broadcast_event(task_id, status_payload)
+    
+    # Re-enqueue task execution
+    await enqueue_task(task.id, task.prompt, task.repo_url, task.git_branch)
+    
+    return {"id": task.id, "status": "pending", "message": "Task re-queued successfully"}
 
 @app.delete("/api/tasks/{task_id}")
 async def delete_task(task_id: int, db: AsyncSession = Depends(get_db)):

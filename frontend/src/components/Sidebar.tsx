@@ -73,6 +73,22 @@ export default function Sidebar() {
     }
   };
 
+  const handleRetryTask = async (e: React.MouseEvent, id: number) => {
+    e.stopPropagation();
+    e.preventDefault();
+    try {
+      const res = await fetch(`${apiBase}/api/tasks/${id}/retry`, { method: "POST" });
+      if (res.ok) {
+        setTasks((prev) =>
+          prev.map((t) => (t.id === id ? { ...t, status: "pending" } : t))
+        );
+        router.push(`/tasks/${id}`);
+      }
+    } catch (err) {
+      console.error("Failed to retry task", err);
+    }
+  };
+
   const handleClearAll = async () => {
     if (!confirm("Are you sure you want to delete all tasks and execution logs?")) return;
     try {
@@ -175,13 +191,21 @@ export default function Sidebar() {
 
               {!collapsed && (
                 <div className={styles.taskActions}>
-                  {isStopable && (
+                  {isStopable ? (
                     <button
                       className={`${styles.actionIconBtn} ${styles.stopBtn}`}
                       onClick={(e) => handleStopTask(e, t.id)}
                       title="Stop / Cancel Task"
                     >
                       ⏹
+                    </button>
+                  ) : (
+                    <button
+                      className={`${styles.actionIconBtn} ${styles.retryBtn}`}
+                      onClick={(e) => handleRetryTask(e, t.id)}
+                      title="Retry / Restart Task"
+                    >
+                      🔄
                     </button>
                   )}
                   <button

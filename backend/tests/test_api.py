@@ -145,3 +145,54 @@ async def test_health_check_endpoint():
             # Test HEAD (UptimeRobot default probe)
             head_response = await ac.head(route)
             assert head_response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_retry_task_endpoint():
+    fake_task = Task(id=303, prompt="Retry me", status=TaskStatus.FAILED)
+    mock_db = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = fake_task
+    mock_db.execute.return_value = mock_result
+    mock_db.commit = AsyncMock()
+    mock_db.add = MagicMock()
+
+    from app.db import get_db
+    app.dependency_overrides[get_db] = lambda: mock_db
+
+    with patch("app.main.enqueue_task", new_callable=AsyncMock) as mock_enqueue:
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.post("/api/tasks/303/retry")
+            app.dependency_overrides.clear()
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["id"] == 303
+            assert data["status"] == "pending"
+            assert fake_task.status == TaskStatus.PENDING
+            assert mock_enqueue.called
+
+
+@pytest.mark.asyncio
+async def test_delete_task_endpoint():
+    fake_task = Task(id=404, prompt="Delete me", status=TaskStatus.COMPLETED)
+    mock_db = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = fake_task
+    mock_db.execute.return_value = mock_result
+    mock_db.delete = AsyncMock()
+    mock_db.commit = AsyncMock()
+
+    from app.db import get_db
+    app.dependency_overrides[get_db] = lambda: mock_db
+
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.delete("/api/tasks/404")
+        app.dependency_overrides.clear()
+
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        assert mock_db.delete.called
+

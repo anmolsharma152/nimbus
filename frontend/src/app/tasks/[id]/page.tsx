@@ -108,6 +108,22 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
     }
   };
 
+  const handleRetry = async () => {
+    try {
+      const res = await fetch(`${apiBase}/api/tasks/${id}/retry`, { method: "POST" });
+      if (res.ok) {
+        setTask((prev) => prev ? { ...prev, status: "pending" } : null);
+        // Refresh events to show restart
+        fetch(`${apiBase}/api/tasks/${id}/events`)
+          .then((r) => r.ok ? r.json() : [])
+          .then((data) => { if (Array.isArray(data)) setEvents(data); })
+          .catch(() => {});
+      }
+    } catch (err) {
+      console.error("Failed to retry task", err);
+    }
+  };
+
   const handleDelete = async () => {
     if (!confirm(`Are you sure you want to delete Task #${id}?`)) return;
     try {
@@ -136,7 +152,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
           )}
         </div>
         <div className={styles.headerRight} style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-          {isStopable && (
+          {isStopable ? (
             <button
               onClick={handleCancel}
               style={{
@@ -155,6 +171,26 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
               title="Stop Agent Execution"
             >
               ⏹ Stop Task
+            </button>
+          ) : (
+            <button
+              onClick={handleRetry}
+              style={{
+                background: "rgba(99, 102, 241, 0.15)",
+                border: "1px solid rgba(99, 102, 241, 0.4)",
+                color: "#a5b4fc",
+                padding: "6px 12px",
+                borderRadius: "6px",
+                fontSize: "0.8rem",
+                fontWeight: 600,
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: "4px"
+              }}
+              title="Retry / Restart this Task"
+            >
+              🔄 Retry Task
             </button>
           )}
 
