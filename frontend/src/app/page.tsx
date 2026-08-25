@@ -4,7 +4,6 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import styles from "./page.module.css";
-import MakerCard from "../components/MakerCard";
 
 const PROMPT_PRESETS = [
   {
@@ -26,9 +25,9 @@ const PROMPT_PRESETS = [
 ];
 
 const POPULAR_REPOS = [
-  "https://github.com/anmolsharma152/CodexEngine",
   "https://github.com/anmolsharma152/RecSys_RL",
   "https://github.com/anmolsharma152/nimbus",
+  "https://github.com/anmolsharma152/CodexEngine",
 ];
 
 export default function Home() {
@@ -78,11 +77,6 @@ export default function Home() {
       <div className={styles.contentWrapper}>
         {/* Hero Section */}
         <section className={styles.hero}>
-          <div className={styles.badge}>
-            <span className={styles.badgeDot} />
-            <span>Autonomous Cloud Software Engineer v2.0</span>
-          </div>
-
           <div className={styles.brandLogo}>
             <svg className={styles.cloudSvg} viewBox="0 0 64 64" fill="none">
               <defs>
@@ -106,7 +100,7 @@ export default function Home() {
           </div>
 
           <p className={styles.subtitle}>
-            Turn natural language prompts into tested git pull requests with zero-trust sandboxing and 3-tier resilient multi-LLM routing.
+            Autonomous Cloud Software Engineer
           </p>
 
           {/* Quick Prompt Presets */}
@@ -139,7 +133,7 @@ export default function Home() {
 
             <textarea
               className={styles.textarea}
-              placeholder="Describe your coding task (e.g. Implement comprehensive unit tests for auth middleware, fix edge cases in data parser)..."
+              placeholder="Describe your coding task (e.g., Create unit tests, fix a bug, implement a new feature)..."
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               rows={4}
@@ -184,69 +178,27 @@ export default function Home() {
 
             <div className={styles.actionsRow}>
               <span className={styles.sandboxHint}>
-                🔒 <strong>Zero-Trust Sandbox:</strong> Clones into ephemeral subshell &amp; creates draft PR.
+                🔒 <strong>Zero-Trust Sandbox:</strong> Clones into ephemeral container &amp; opens Draft PR.
               </span>
               <button
                 type="submit"
                 className={styles.submitBtn}
                 disabled={!prompt.trim() || isSubmitting}
               >
-                {isSubmitting ? "Launching Agent..." : "Start Agent ➔"}
+                {isSubmitting ? "Launching..." : "Start Agent ➔"}
               </button>
             </div>
           </div>
         </form>
 
-        {/* Feature Grid */}
-        <h2 className={styles.sectionTitle}>Built for High-Assurance Autonomy</h2>
-        <p className={styles.sectionSubtitle}>
-          Isolated workspace execution with enterprise-grade resilience and observability.
-        </p>
-
-        <div className={styles.featuresGrid}>
-          <div className={styles.featureCard}>
-            <div className={styles.featureIcon}>🛡️</div>
-            <h3 className={styles.featureHeading}>Zero-Trust Sandboxing</h3>
-            <p className={styles.featureDesc}>
-              Runs untrusted code inside ephemeral subshells and Docker containers. Full directory cleanup on termination.
-            </p>
-          </div>
-
-          <div className={styles.featureCard}>
-            <div className={styles.featureIcon}>⚡</div>
-            <h3 className={styles.featureHeading}>3-Tier Multi-LLM Routing</h3>
-            <p className={styles.featureDesc}>
-              Automatic failover across Gemini 3.6 Flash, Groq (<code>gpt-oss-120b</code>), and OpenRouter with jittered retries.
-            </p>
-          </div>
-
-          <div className={styles.featureCard}>
-            <div className={styles.featureIcon}>📡</div>
-            <h3 className={styles.featureHeading}>Real-Time Flight Recorder</h3>
-            <p className={styles.featureDesc}>
-              Live WebSocket streaming of shell execution, stdout/stderr logs, tool decisions, and real-time diff inspection.
-            </p>
-          </div>
-
-          <div className={styles.featureCard}>
-            <div className={styles.featureIcon}>🌿</div>
-            <h3 className={styles.featureHeading}>Automated Git &amp; Draft PRs</h3>
-            <p className={styles.featureDesc}>
-              Automated branch checkout, test validation, git commit, and GitHub Draft Pull Request creation.
-            </p>
-          </div>
-        </div>
-
-        {/* Maker Attribution Card */}
-        <MakerCard />
-
-        {/* Footer */}
+        {/* Minimal Clean Footer */}
         <footer className={styles.footer}>
-          <span>Nimbus Agent &copy; {new Date().getFullYear()}</span>
+          <span>Nimbus &copy; {new Date().getFullYear()}</span>
           <div className={styles.footerLinks}>
-            <Link href="/security" className={styles.footerLink}>Security Architecture</Link>
+            <Link href="/architecture" className={styles.footerLink}>Architecture</Link>
+            <Link href="/security" className={styles.footerLink}>Security</Link>
+            <Link href="/about" className={styles.footerLink}>About Creator</Link>
             <a href="https://github.com/anmolsharma152/nimbus" target="_blank" rel="noopener noreferrer" className={styles.footerLink}>GitHub</a>
-            <a href="https://anmolsharma152.vercel.app" target="_blank" rel="noopener noreferrer" className={styles.footerLink}>Creator Portfolio</a>
           </div>
         </footer>
       </div>

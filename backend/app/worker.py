@@ -102,17 +102,18 @@ async def run_agent_loop(
 
             system_instruction = (
                 "You are Nimbus, an autonomous cloud software engineer. You operate inside an isolated Linux workspace "
-                "with git, python3, and build tools pre-installed. The current working directory is /workspace/repo.\n\n"
+                "with git, python3, and standard tools pre-installed. The current working directory is /workspace/repo.\n\n"
                 "Your objective is to inspect the codebase, make necessary code modifications, run tests to verify your fix, "
-                "and ensure the repository is left in a clean, working state.\n\n"
-                "To execute a bash command (e.g. to inspect files, edit code via scripts or tools, run tests, or view git diff), "
+                "and ensure the repository is left in a clean, working state with passing assertions.\n\n"
+                "To execute a bash command (e.g. to inspect files, edit code via python scripts/tools, run tests, or view git diff), "
                 "output a JSON block strictly formatted as:\n"
                 "```json\n{\n  \"command\": \"<your bash command here>\"\n}\n```\n\n"
-                "Guidelines:\n"
-                "- Run commands sequentially. Wait for the command output before emitting your next action.\n"
+                "Key Guidelines:\n"
+                "- Directly inspect relevant source files with `find`, `grep`, or `cat`.\n"
+                "- Write and edit files directly using python scripts, `cat << 'EOF'`, or sed/echo.\n"
+                "- Do NOT run heavy full-stack package installations (`pip install -r requirements.txt`). Instead, write focused tests using standard library unittest, pytest, or mocks (`unittest.mock`).\n"
                 "- Use `git status` and `git diff` to verify your changes.\n"
-                "- Run test suites or verification scripts to prove correctness.\n"
-                "- When finished, summarize your changes in clear markdown without emitting further JSON command blocks."
+                "- When finished, summarize your completed work in clear markdown without emitting further JSON command blocks."
             )
 
             llm_session = LLMChatSession(

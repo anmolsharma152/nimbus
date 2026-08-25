@@ -34,58 +34,87 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
   const wsBase = process.env.NEXT_PUBLIC_WS_URL || apiBase.replace(/^http/, "ws");
 
-  // Fetch initial task details & historical events
+  // 1. Fetch initial task details & historical events
   useEffect(() => {
-    // 1. Fetch task details
-    fetch(`${apiBase}/api/tasks/${id}`)
-      .then((res) => {
-        if (!res.ok) throw new Error("Task not found");
-        return res.json();
-      })
-      .then((data) => setTask(data))
-      .catch((err) => console.error("Failed to fetch task", err));
+    const fetchTask = () => {
+      fetch(`${apiBase}/api/tasks/${id}`)
+        .then((res) => {
+          if (!res.ok) throw new Error("Task not found");
+          return res.json();
+        })
+        .then((data) => setTask(data))
+        .catch((err) => console.error("Failed to fetch task", err));
+    };
 
-    // 2. Fetch all recorded events
-    fetch(`${apiBase}/api/tasks/${id}/events`)
-      .then((res) => (res.ok ? res.json() : []))
-      .then((data) => {
-        if (Array.isArray(data) && data.length > 0) {
-          setEvents(data);
-        }
-      })
-      .catch((err) => console.error("Failed to fetch task events", err));
+    const fetchEvents = () => {
+      fetch(`${apiBase}/api/tasks/${id}/events`)
+        .then((res) => (res.ok ? res.json() : []))
+        .then((data) => {
+          if (Array.isArray(data) && data.length > 0) {
+            setEvents((prev) => {
+              if (data.length !== prev.length) {
+                return data;
+              }
+              return prev;
+            });
+          }
+        })
+        .catch((err) => console.error("Failed to fetch task events", err));
+    };
+
+    fetchTask();
+    fetchEvents();
+
+    // Active polling reconciler while task is running/pending
+    const poller = setInterval(() => {
+      fetchEvents();
+      fetchTask();
+    }, 1500);
+
+    return () => clearInterval(poller);
   }, [id, apiBase]);
 
-  // Connect WebSocket for live streaming updates
+  // 2. Connect WebSocket for sub-second instant streaming
   useEffect(() => {
     let ws: WebSocket | null = null;
-    try {
-      ws = new WebSocket(`${wsBase}/ws/tasks/${id}`);
-      
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.type === "status") {
-            const parsed = typeof data.payload === "string" ? JSON.parse(data.payload) : data.payload;
-            setTask((prev) => prev ? { ...prev, status: parsed.status } : null);
-            // Refresh full task to get patch/PR if completed
-            if (parsed.status === "completed" || parsed.status === "failed") {
-              fetch(`${apiBase}/api/tasks/${id}`)
-                .then((res) => res.json())
-                .then((d) => setTask(d))
-                .catch(() => {});
+    let reconnectTimeout: any = null;
+
+    const connectWS = () => {
+      try {
+        ws = new WebSocket(`${wsBase}/ws/tasks/${id}`);
+        
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === "status") {
+              const parsed = typeof data.payload === "string" ? JSON.parse(data.payload) : data.payload;
+              setTask((prev) => prev ? { ...prev, status: parsed.status } : null);
+              if (parsed.status === "completed" || parsed.status === "failed") {
+                fetch(`${apiBase}/api/tasks/${id}`)
+                  .then((res) => res.json())
+                  .then((d) => setTask(d))
+                  .catch(() => {});
+              }
             }
+            setEvents((prev) => [...prev, data]);
+          } catch (err) {
+            console.error("Failed to parse WS message", err);
           }
-          setEvents((prev) => [...prev, data]);
-        } catch (err) {
-          console.error("Failed to parse WS message", err);
-        }
-      };
-    } catch (wsErr) {
-      console.warn("WebSocket connection notice:", wsErr);
-    }
+        };
+
+        ws.onclose = () => {
+          // Attempt auto-reconnection in 3 seconds if task is active
+          reconnectTimeout = setTimeout(connectWS, 3000);
+        };
+      } catch (wsErr) {
+        console.warn("WebSocket connection notice:", wsErr);
+      }
+    };
+
+    connectWS();
 
     return () => {
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
       if (ws) ws.close();
     };
   }, [id, apiBase, wsBase]);
