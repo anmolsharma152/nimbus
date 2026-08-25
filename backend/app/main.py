@@ -169,7 +169,7 @@ async def get_task_events(task_id: int, db: AsyncSession = Depends(get_db)):
             "id": ev.id,
             "type": str(ev.event_type.value).lower() if hasattr(ev.event_type, "value") else str(ev.event_type).lower(),
             "payload": ev.payload,
-            "timestamp": ev.created_at.isoformat()
+            "timestamp": ev.created_at.isoformat() + "Z"
         }
         for ev in events
     ]
@@ -291,7 +291,7 @@ async def websocket_endpoint(websocket: WebSocket, task_id: int, db: AsyncSessio
         await websocket.send_text(json.dumps({
             "type": ev_type,
             "payload": ev.payload,
-            "timestamp": ev.created_at.isoformat()
+            "timestamp": ev.created_at.isoformat() + "Z"
         }))
 
     try:
