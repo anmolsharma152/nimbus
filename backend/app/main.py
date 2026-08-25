@@ -5,12 +5,21 @@ from sqlalchemy.future import select
 from pydantic import BaseModel
 import json
 import asyncio
+import datetime
+from contextlib import asynccontextmanager
 
 from .db import get_db
 from .models import Task, TaskEvent, TaskStatus
 from .worker import enqueue_task
 
-app = FastAPI(title="Nimbus Control Plane")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifecycle manager for startup and graceful shutdown of async resources."""
+    # Startup
+    yield
+    # Shutdown
+
+app = FastAPI(title="Nimbus Control Plane", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -63,6 +72,25 @@ async def get_task(task_id: int, db: AsyncSession = Depends(get_db)):
         "pr_url": task.pr_url,
         "patch_diff": task.patch_diff
     }
+
+@app.post("/api/tasks/{task_id}/cancel")
+async def cancel_task(task_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        return {"error": "Task not found"}
+    
+    if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+        return {"id": task.id, "status": task.status.value, "message": "Task already in terminal state"}
+
+    task.status = TaskStatus.CANCELLED
+    await db.commit()
+    
+    # Broadcast cancellation event
+    cancel_payload = {"type": "status", "payload": json.dumps({"status": "cancelled"}), "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    await manager.broadcast_event(task_id, cancel_payload)
+    
+    return {"id": task.id, "status": "cancelled", "message": "Task cancelled successfully"}
 
 # Simple in-memory connection manager for WebSockets
 class ConnectionManager:

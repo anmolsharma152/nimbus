@@ -101,3 +101,28 @@ async def test_internal_event_broadcast():
         response = await ac.post("/api/internal/tasks/101/events", json=payload)
         assert response.status_code == 200
         assert response.json() == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_endpoint():
+    fake_task = Task(id=202, prompt="Long running task", status=TaskStatus.RUNNING)
+    mock_db = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = fake_task
+    mock_db.execute.return_value = mock_result
+    mock_db.commit = AsyncMock()
+
+    from app.db import get_db
+    app.dependency_overrides[get_db] = lambda: mock_db
+
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.post("/api/tasks/202/cancel")
+        app.dependency_overrides.clear()
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == 202
+        assert data["status"] == "cancelled"
+        assert fake_task.status == TaskStatus.CANCELLED
+        assert mock_db.commit.called

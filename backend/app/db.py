@@ -15,7 +15,17 @@ def normalize_async_db_url(url: str) -> str:
 
 db_url = normalize_async_db_url(settings.DATABASE_URL)
 
-engine = create_async_engine(db_url, echo=settings.DB_ECHO)
+# Configure production connection pool settings (safe for both PostgreSQL and SQLite in tests)
+engine_kwargs = {"echo": settings.DB_ECHO}
+if "sqlite" not in db_url:
+    engine_kwargs.update({
+        "pool_size": 20,
+        "max_overflow": 10,
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+    })
+
+engine = create_async_engine(db_url, **engine_kwargs)
 async_session = async_sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False
 )

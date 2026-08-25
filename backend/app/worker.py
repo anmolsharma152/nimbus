@@ -78,7 +78,7 @@ async def run_agent_loop(
         )
 
         try:
-            _, setup_out = workspace.setup(
+            _, setup_out = await workspace.asetup(
                 repo_url=repo_url,
                 branch_name=branch_name,
                 github_token=settings.GITHUB_TOKEN
@@ -110,8 +110,8 @@ async def run_agent_loop(
                 "- When finished, summarize your changes in clear markdown without emitting further JSON command blocks."
             )
 
-            model_name = "gemini-2.5-flash"
-            chat = client.chats.create(
+            model_name = settings.GEMINI_MODEL or "gemini-2.5-flash"
+            chat = client.aio.chats.create(
                 model=model_name,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
@@ -126,11 +126,17 @@ async def run_agent_loop(
                 f"Active Branch: {branch_name}\n"
                 "Begin by listing files or inspecting the project structure."
             )
-            max_iterations = 20
+            max_iterations = settings.MAX_AGENT_ITERATIONS
             
             for iteration in range(max_iterations):
-                response = chat.send_message(current_prompt)
-                text = response.text
+                # Check for cancellation before turn
+                await db.refresh(task)
+                if task.status == TaskStatus.CANCELLED:
+                    await log_event(db, task_id, EventType.LOG, {"message": "Task execution cancelled by user."})
+                    return
+
+                response = await chat.send_message(current_prompt)
+                text = response.text or ""
                 
                 # Check if LLM emitted a command block
                 if "```json" in text and "\"command\":" in text:
@@ -141,8 +147,8 @@ async def run_agent_loop(
                         
                         await log_event(db, task_id, EventType.COMMAND, {"command": command})
                         
-                        # Execute in workspace
-                        exit_code, output = workspace.execute_command(command)
+                        # Execute in workspace asynchronously
+                        exit_code, output = await workspace.aexecute_command(command)
                         
                         # Limit output length to prevent context explosion
                         if len(output) > 10000:
@@ -162,7 +168,7 @@ async def run_agent_loop(
                     break
             
             # Post-execution: capture diff and create PR / commit
-            diff_text = workspace.get_diff()
+            diff_text = await workspace.aget_diff()
             if diff_text:
                 task.patch_diff = diff_text
                 await log_event(
@@ -171,12 +177,12 @@ async def run_agent_loop(
                     EventType.LOG,
                     {"message": f"Generated patch diff ({len(diff_text)} chars). Committing changes..."}
                 )
-                workspace.commit_changes(f"Nimbus: {prompt[:60]}")
+                await workspace.acommit_changes(f"Nimbus: {prompt[:60]}")
                 
                 # Push branch and open Draft PR if repo_url and token exist
                 if repo_url and settings.GITHUB_TOKEN:
                     await log_event(db, task_id, EventType.LOG, {"message": f"Pushing branch '{branch_name}' to GitHub..."})
-                    push_code, push_out = workspace.push_branch(branch_name, repo_url, settings.GITHUB_TOKEN)
+                    push_code, push_out = await workspace.apush_branch(branch_name, repo_url, settings.GITHUB_TOKEN)
                     if push_code == 0:
                         pr_url = await create_draft_pr(
                             repo_url=repo_url,
@@ -204,7 +210,7 @@ async def run_agent_loop(
             await db.commit()
             await log_event(db, task_id, EventType.STATUS, {"status": "failed"})
         finally:
-            workspace.cleanup()
+            await workspace.acleanup()
 
 # Setup arq settings
 redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)

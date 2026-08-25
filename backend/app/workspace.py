@@ -1,6 +1,7 @@
 import docker
 from docker.models.containers import Container
 from typing import Optional, Tuple
+import asyncio
 import time
 import shlex
 import base64
@@ -185,3 +186,43 @@ class DockerWorkspace:
                 print(f"Failed to cleanup workspace: {e}")
             finally:
                 self.container = None
+
+    # Asynchronous non-blocking wrappers for production event-loop concurrency
+    async def asetup(
+        self,
+        repo_url: Optional[str] = None,
+        branch_name: Optional[str] = None,
+        github_token: Optional[str] = None
+    ) -> Tuple[int, str]:
+        """Asynchronously provisions the Docker workspace in a background thread."""
+        return await asyncio.to_thread(self.setup, repo_url, branch_name, github_token)
+
+    async def aexecute_command(
+        self,
+        command: str,
+        workdir: Optional[str] = None,
+        timeout: int = 300
+    ) -> Tuple[int, str]:
+        """Asynchronously executes a command inside the container without blocking the event loop."""
+        return await asyncio.to_thread(self.execute_command, command, workdir, timeout)
+
+    async def aget_diff(self) -> str:
+        """Asynchronously retrieves git diff without blocking the event loop."""
+        return await asyncio.to_thread(self.get_diff)
+
+    async def acommit_changes(self, message: str = "Nimbus agent automated changes") -> Tuple[int, str]:
+        """Asynchronously commits changes without blocking the event loop."""
+        return await asyncio.to_thread(self.commit_changes, message)
+
+    async def apush_branch(
+        self,
+        branch_name: str,
+        repo_url: str,
+        github_token: Optional[str] = None
+    ) -> Tuple[int, str]:
+        """Asynchronously pushes branch to GitHub without blocking the event loop."""
+        return await asyncio.to_thread(self.push_branch, branch_name, repo_url, github_token)
+
+    async def acleanup(self):
+        """Asynchronously cleans up container resources without blocking the event loop."""
+        await asyncio.to_thread(self.cleanup)
