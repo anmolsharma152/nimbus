@@ -5,7 +5,7 @@ from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 
-from app.db import Base
+from app.db import Base, normalize_async_db_url
 from app.models import Task, TaskEvent
 from app.settings import settings
 
@@ -22,10 +22,7 @@ if config.config_file_name is not None:
 # for 'autogenerate' support
 target_metadata = Base.metadata
 
-alembic_db_url = settings.DATABASE_URL
-if alembic_db_url.startswith("postgresql://"):
-    alembic_db_url = alembic_db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-
+alembic_db_url = normalize_async_db_url(settings.DATABASE_URL)
 config.set_main_option("sqlalchemy.url", alembic_db_url)
 
 def run_migrations_offline() -> None:
@@ -72,4 +69,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-

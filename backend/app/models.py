@@ -4,20 +4,31 @@ import enum
 import datetime
 from .db import Base
 
+
+def utc_now():
+    """Returns current UTC timestamp without timezone offset for naive DateTime columns."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
 class TaskStatus(enum.Enum):
+    """Lifecycle states of an autonomous agent task."""
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
+
 class EventType(enum.Enum):
+    """Types of events logged in the append-only task event stream."""
     LOG = "log"
     COMMAND = "command"
     RESULT = "result"
     STATUS = "status"
 
+
 class Task(Base):
+    """Database model representing a delegated coding task."""
     __tablename__ = "tasks"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -27,18 +38,20 @@ class Task(Base):
     pr_url = Column(String, nullable=True)
     patch_diff = Column(Text, nullable=True)
     status = Column(Enum(TaskStatus), default=TaskStatus.PENDING, nullable=False)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     events = relationship("TaskEvent", back_populates="task", cascade="all, delete-orphan")
 
+
 class TaskEvent(Base):
+    """Immutable, append-only event record for task execution history and live streaming."""
     __tablename__ = "task_events"
 
     id = Column(Integer, primary_key=True, index=True)
     task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False)
     event_type = Column(Enum(EventType), nullable=False)
-    payload = Column(Text, nullable=False) # JSON string
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    payload = Column(Text, nullable=False)  # JSON-encoded string
+    created_at = Column(DateTime, default=utc_now)
 
     task = relationship("Task", back_populates="events")

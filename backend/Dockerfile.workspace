@@ -1,0 +1,21 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    ca-certificates \
+    python3 \
+    python3-pip \
+    python3-venv \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up git user defaults
+RUN git config --global user.name "Nimbus Agent" && \
+    git config --global user.email "agent@nimbus.ai" && \
+    git config --global --add safe.directory "*"
+
+WORKDIR /workspace
+CMD ["tail", "-f", "/dev/null"]
