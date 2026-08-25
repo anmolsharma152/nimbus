@@ -28,11 +28,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-@app.get("/healthz")
-@app.get("/api/health")
+@app.api_route("/", methods=["GET", "HEAD"])
+@app.api_route("/healthz", methods=["GET", "HEAD"])
+@app.api_route("/api/health", methods=["GET", "HEAD"])
 async def health_check():
-    """Lightweight keep-alive and health check endpoint for UptimeRobot / ping monitors."""
+    """Lightweight keep-alive and health check endpoint for UptimeRobot / ping monitors (supports GET and HEAD)."""
     return {
         "status": "healthy",
         "service": "nimbus-control-plane",

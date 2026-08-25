@@ -6,6 +6,8 @@
 
 *Delegate coding tasks to an isolated, disposable cloud sandbox that inspects repositories, modifies code, runs test suites, captures tested patches, and opens GitHub Pull Requests with live streaming visibility.*
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-nimbusagent.vercel.app-000000?style=for-the-badge&logo=vercel&logoColor=white)](https://nimbusagent.vercel.app/)
+
 [![Python 3.13+](https://img.shields.io/badge/Python-3.13%2B-blue?logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.141+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![Next.js 16](https://img.shields.io/badge/Next.js-16.3%20(Turbopack)-black?logo=next.js&logoColor=white)](https://nextjs.org)
@@ -13,9 +15,10 @@
 [![Redis](https://img.shields.io/badge/Redis-7%20(arq)-DC382D?logo=redis&logoColor=white)](https://redis.io)
 [![Docker](https://img.shields.io/badge/Docker-Sandboxed%20microVM-2496ED?logo=docker&logoColor=white)](https://docker.com)
 [![Gemini 2.5](https://img.shields.io/badge/LLM-Google%20Gemini%202.5-8E75B2?logo=google&logoColor=white)](https://ai.google.dev)
-[![Tests](https://img.shields.io/badge/Tests-17%2F17%20Passing-brightgreen?logo=pytest&logoColor=white)](#testing--evals-benchmark)
+[![Tests](https://img.shields.io/badge/Tests-19%2F19%20Passing-brightgreen?logo=pytest&logoColor=white)](#testing--evals-benchmark)
 
 <p align="center">
+  <b>🌐 <a href="https://nimbusagent.vercel.app/">Live Web App</a></b> &nbsp;|&nbsp;
   <b>Engineered by <a href="https://linkedin.com/in/anmolsharma152">Anmol Sharma</a></b> &nbsp;|&nbsp;
   <b><a href="https://github.com/anmolsharma152">GitHub</a></b> &nbsp;|&nbsp;
   <b><a href="https://anmolsharma152.vercel.app">Live Portfolio</a></b>
