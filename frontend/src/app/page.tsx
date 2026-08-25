@@ -162,32 +162,42 @@ export default function Home() {
               <span style={{ fontSize: "0.75rem", color: "#818cf8", fontFamily: "monospace" }}>3-Tier LLM</span>
             </div>
 
-            <textarea
-              className={styles.textarea}
-              placeholder="Describe your coding task (e.g., Create unit tests, fix a bug, implement a new feature)..."
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              rows={4}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSubmit(e);
-                }
-              }}
-            />
+            {/* High-Contrast Prompt Input Container */}
+            <div className={styles.promptInputWrapper}>
+              <div className={styles.inputHeader}>
+                <label htmlFor="promptInput" className={styles.inputLabel}>
+                  <span className={styles.promptIcon}>✨</span> Task Directive / Instructions:
+                </label>
+                <span className={styles.inputHint}>Enter to launch • Shift+Enter for newline</span>
+              </div>
+              <textarea
+                id="promptInput"
+                className={styles.textarea}
+                placeholder="Describe your coding task (e.g. Inspect the codebase, add missing unit tests for core modules, and verify with pytest)..."
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                rows={4}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSubmit(e);
+                  }
+                }}
+              />
+            </div>
 
-            {/* Target Repo Input with Dynamic GitHub Fetcher */}
+            {/* High-Contrast Target Repo Input with Dynamic GitHub Fetcher */}
             <div className={styles.repoSection}>
               <div className={styles.repoHeaderRow}>
                 <span className={styles.repoLabel}>
-                  🐙 Live GitHub Repos ({ghUser}):
+                  🐙 Target Repository (Live repos for {ghUser}):
                 </span>
                 <button
                   type="button"
                   className={styles.userToggleBtn}
                   onClick={() => setIsEditingUser(!isEditingUser)}
                 >
-                  {isEditingUser ? "Close" : "Change User / Org"}
+                  {isEditingUser ? "Close Search" : "Change User / Org"}
                 </button>
               </div>
 
@@ -213,7 +223,7 @@ export default function Home() {
               {/* Dynamic Repos Chips */}
               <div className={styles.repoChipsRow}>
                 {isLoadingRepos && (
-                  <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", fontStyle: "italic" }}>
+                  <span style={{ fontSize: "0.75rem", color: "#a1a1aa", fontStyle: "italic" }}>
                     Fetching repositories from GitHub...
                   </span>
                 )}
