@@ -128,3 +128,15 @@ async def test_cancel_task_endpoint():
         assert data["status"] == "cancelled"
         assert fake_task.status == TaskStatus.CANCELLED
         assert mock_db.commit.called
+
+
+@pytest.mark.asyncio
+async def test_health_check_endpoint():
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        for route in ("/", "/healthz", "/api/health"):
+            response = await ac.get(route)
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "healthy"
+            assert data["service"] == "nimbus-control-plane"

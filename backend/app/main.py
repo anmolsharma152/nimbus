@@ -28,6 +28,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+@app.get("/healthz")
+@app.get("/api/health")
+async def health_check():
+    """Lightweight keep-alive and health check endpoint for UptimeRobot / ping monitors."""
+    return {
+        "status": "healthy",
+        "service": "nimbus-control-plane",
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    }
+
 class TaskCreate(BaseModel):
     prompt: str
     repo_url: Optional[str] = None
