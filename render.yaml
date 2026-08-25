@@ -58,6 +58,8 @@ databases:
     databaseName: nimbus_db
     user: nimbus_user
 
+redis:
   # 4. Redis Service
   - name: nimbus-redis
     plan: free
+    ipAllowList: []
