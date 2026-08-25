@@ -6,6 +6,7 @@ Tier 3: OpenRouter (google/gemma-4-31b-it:free) via OpenAI-compatible REST endpo
 """
 
 import json
+import asyncio
 from typing import Callable, Coroutine, List, Dict, Any, Optional
 import httpx
 from google import genai

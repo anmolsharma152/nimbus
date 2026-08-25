@@ -123,13 +123,17 @@ export default function Sidebar() {
       <div className={styles.sidebarHeader}>
         {!collapsed && (
           <Link href="/" className={styles.brand}>
-            <div className={styles.orb} />
+            <svg width="22" height="22" viewBox="0 0 64 64" fill="none" style={{ flexShrink: 0, filter: "drop-shadow(0 0 6px rgba(255,255,255,0.4))" }}>
+              <path d="M47 45C52.5228 45 57 40.5228 57 35C57 29.7909 53.0125 25.5126 47.9404 25.0487C46.6105 17.0381 39.6836 11 31.3333 11C22.0506 11 14.3752 18.2023 13.7212 27.3533C9.94825 28.5029 7 32.0267 7 36.3333C7 41.12 10.88 45 15.6667 45H47Z" fill="#ffffff"/>
+            </svg>
             <span className={styles.brandName}>Nimbus</span>
           </Link>
         )}
         {collapsed && (
           <div style={{ margin: "0 auto" }}>
-            <div className={styles.orb} />
+            <svg width="22" height="22" viewBox="0 0 64 64" fill="none" style={{ filter: "drop-shadow(0 0 6px rgba(255,255,255,0.4))" }}>
+              <path d="M47 45C52.5228 45 57 40.5228 57 35C57 29.7909 53.0125 25.5126 47.9404 25.0487C46.6105 17.0381 39.6836 11 31.3333 11C22.0506 11 14.3752 18.2023 13.7212 27.3533C9.94825 28.5029 7 32.0267 7 36.3333C7 41.12 10.88 45 15.6667 45H47Z" fill="#ffffff"/>
+            </svg>
           </div>
         )}
         <button
@@ -225,8 +229,10 @@ export default function Sidebar() {
       {/* Footer */}
       {!collapsed && (
         <div className={styles.sidebarFooter}>
-          <span>Zero-Trust Sandbox</span>
-          <span style={{ fontSize: "0.7rem", color: "#818cf8" }}>v2.0</span>
+          <Link href="/security" style={{ color: "var(--text-muted)", textDecoration: "none", fontSize: "0.75rem", display: "flex", alignItems: "center", gap: "4px" }}>
+            🛡️ Zero-Trust Security
+          </Link>
+          <span style={{ fontSize: "0.7rem", color: "#818cf8", fontFamily: "monospace" }}>v2.0</span>
         </div>
       )}
     </aside>
