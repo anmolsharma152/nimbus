@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef, use } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import styles from "./task.module.css";
 
 interface EventPayload {
@@ -28,6 +29,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
   const [events, setEvents] = useState<EventPayload[]>([]);
   const [showDiff, setShowDiff] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const router = useRouter();
 
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
   const wsBase = process.env.NEXT_PUBLIC_WS_URL || apiBase.replace(/^http/, "ws");
@@ -95,6 +97,31 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
     }
   }, [events]);
 
+  const handleCancel = async () => {
+    try {
+      const res = await fetch(`${apiBase}/api/tasks/${id}/cancel`, { method: "POST" });
+      if (res.ok) {
+        setTask((prev) => prev ? { ...prev, status: "cancelled" } : null);
+      }
+    } catch (err) {
+      console.error("Failed to cancel task", err);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!confirm(`Are you sure you want to delete Task #${id}?`)) return;
+    try {
+      const res = await fetch(`${apiBase}/api/tasks/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        router.push("/");
+      }
+    } catch (err) {
+      console.error("Failed to delete task", err);
+    }
+  };
+
+  const isStopable = task?.status === "running" || task?.status === "pending";
+
   return (
     <div className={styles.layout}>
       {/* Header */}
@@ -108,7 +135,48 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
             </span>
           )}
         </div>
-        <div className={styles.headerRight} style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+        <div className={styles.headerRight} style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+          {isStopable && (
+            <button
+              onClick={handleCancel}
+              style={{
+                background: "rgba(234, 179, 8, 0.15)",
+                border: "1px solid rgba(234, 179, 8, 0.4)",
+                color: "#fde047",
+                padding: "6px 12px",
+                borderRadius: "6px",
+                fontSize: "0.8rem",
+                fontWeight: 600,
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: "4px"
+              }}
+              title="Stop Agent Execution"
+            >
+              ⏹ Stop Task
+            </button>
+          )}
+
+          <button
+            onClick={handleDelete}
+            style={{
+              background: "rgba(239, 68, 68, 0.12)",
+              border: "1px solid rgba(239, 68, 68, 0.3)",
+              color: "#fca5a5",
+              padding: "6px 10px",
+              borderRadius: "6px",
+              fontSize: "0.8rem",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: "4px"
+            }}
+            title="Delete this task record"
+          >
+            🗑 Delete
+          </button>
+
           {task?.pr_url && (
             <a
               href={task.pr_url}

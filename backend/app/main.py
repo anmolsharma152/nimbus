@@ -197,6 +197,25 @@ async def cancel_task(task_id: int, db: AsyncSession = Depends(get_db)):
     
     return TaskCancelResponse(id=task.id, status="cancelled", message="Task cancelled successfully")
 
+@app.delete("/api/tasks/{task_id}")
+async def delete_task(task_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    
+    await db.delete(task)
+    await db.commit()
+    return {"ok": True, "message": f"Task #{task_id} deleted"}
+
+@app.delete("/api/tasks")
+async def clear_all_tasks(db: AsyncSession = Depends(get_db)):
+    from sqlalchemy import delete
+    await db.execute(delete(TaskEvent))
+    await db.execute(delete(Task))
+    await db.commit()
+    return {"ok": True, "message": "All tasks cleared"}
+
 # Simple connection manager with leak prevention
 class ConnectionManager:
     def __init__(self):
