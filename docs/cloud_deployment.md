@@ -50,7 +50,7 @@ Render allows you to provision the entire backend stack (FastAPI Web Service + a
    * `GEMINI_API_KEY`: Your Google Gemini API Key.
    * `GITHUB_TOKEN`: (Optional) GitHub Personal Access Token for PR creation.
 6. Click **Apply**.
-7. Copy your public `nimbus-api` URL (e.g., `https://nimbus-api.onrender.com`).
+7. Copy your public `nimbus-api` URL (e.g., `https://nimbus-api-l32h.onrender.com`).
 
 ---
 
@@ -77,15 +77,15 @@ If you prefer serverless infrastructure with generous zero-cost free tiers:
 
 ## Deploying the Frontend to Vercel
 
-Once your backend is live and you have your public API URL (e.g. `https://nimbus-api.onrender.com`):
+Once your backend is live and you have your public API URL (e.g. `https://nimbus-api-l32h.onrender.com`):
 
 ### Steps:
-1. Open the [Vercel Import Link](https://vercel.com/new/import?framework=nextjs&path=frontend&project-name=frontend&provider=github&s=https%3A%2F%2Fgithub.com%2Fanmolsharma152%2Fnimbus) from your email or go to [vercel.com/new](https://vercel.com/new).
+1. Open [vercel.com/new](https://vercel.com/new).
 2. Select your repository: **`anmolsharma152/nimbus`**.
 3. Set the **Root Directory** to: `frontend`.
 4. In the **Environment Variables** section, add:
-   * `NEXT_PUBLIC_API_URL` = `https://nimbus-api.onrender.com` (your backend URL)
-   * `NEXT_PUBLIC_WS_URL` = `wss://nimbus-api.onrender.com` (WebSocket protocol `wss://`)
+   * `NEXT_PUBLIC_API_URL` = `https://nimbus-api-l32h.onrender.com`
+   * `NEXT_PUBLIC_WS_URL` = `wss://nimbus-api-l32h.onrender.com`
 5. Click **Deploy**.
 
-Your live frontend will now communicate seamlessly with your cloud control plane!
+Your live frontend at **`https://nimbusagent.vercel.app/`** communicates seamlessly with your cloud control plane!
