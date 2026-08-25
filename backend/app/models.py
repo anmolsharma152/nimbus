@@ -10,21 +10,21 @@ def utc_now():
     return datetime.datetime.now(datetime.timezone.utc)
 
 
-class TaskStatus(enum.Enum):
-    """Lifecycle states of an autonomous agent task."""
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
+class TaskStatus(str, enum.Enum):
+    """Lifecycle states of an autonomous agent task (matching PostgreSQL enum definition)."""
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
-class EventType(enum.Enum):
-    """Types of events logged in the append-only task event stream."""
-    LOG = "log"
-    COMMAND = "command"
-    RESULT = "result"
-    STATUS = "status"
+class EventType(str, enum.Enum):
+    """Types of events logged in the append-only task event stream (matching PostgreSQL enum definition)."""
+    LOG = "LOG"
+    COMMAND = "COMMAND"
+    RESULT = "RESULT"
+    STATUS = "STATUS"
 
 
 class Task(Base):
@@ -37,7 +37,7 @@ class Task(Base):
     git_branch = Column(String, nullable=True)
     pr_url = Column(String, nullable=True)
     patch_diff = Column(Text, nullable=True)
-    status = Column(Enum(TaskStatus), default=TaskStatus.PENDING, nullable=False)
+    status = Column(Enum(TaskStatus, name="taskstatus"), default=TaskStatus.PENDING, nullable=False)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -50,7 +50,7 @@ class TaskEvent(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False)
-    event_type = Column(Enum(EventType), nullable=False)
+    event_type = Column(Enum(EventType, name="eventtype"), nullable=False)
     payload = Column(Text, nullable=False)  # JSON-encoded string
     created_at = Column(DateTime, default=utc_now)
 

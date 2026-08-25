@@ -29,7 +29,7 @@ async def log_event(db: AsyncSession, task_id: int, event_type: EventType, paylo
             await client.post(
                 f"http://localhost:8000/api/internal/tasks/{task_id}/events",
                 json={
-                    "type": event_type.value,
+                    "type": str(event_type.value).lower(),
                     "payload": json.dumps(payload_dict),
                     "timestamp": event.created_at.isoformat()
                 },

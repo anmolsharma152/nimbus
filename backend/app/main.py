@@ -86,7 +86,7 @@ async def create_task(req: TaskCreate, db: AsyncSession = Depends(get_db)):
     # Enqueue task to background worker
     await enqueue_task(task_id, req.prompt, req.repo_url, req.git_branch)
     
-    status_val = task.status.value if hasattr(task.status, "value") else str(task.status or "pending")
+    status_val = str(task.status.value).lower() if hasattr(task.status, "value") else str(task.status or "pending").lower()
     return TaskCreateResponse(
         id=task_id,
         status=status_val,
@@ -100,9 +100,10 @@ async def get_task(task_id: int, db: AsyncSession = Depends(get_db)):
     task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    status_val = str(task.status.value).lower() if hasattr(task.status, "value") else str(task.status).lower()
     return TaskResponse(
         id=task.id,
-        status=task.status.value,
+        status=status_val,
         prompt=task.prompt,
         repo_url=task.repo_url,
         git_branch=task.git_branch,
@@ -118,7 +119,7 @@ async def cancel_task(task_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
     
     if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
-        return TaskCancelResponse(id=task.id, status=task.status.value, message="Task already in terminal state")
+        return TaskCancelResponse(id=task.id, status=str(task.status.value).lower(), message="Task already in terminal state")
 
     task.status = TaskStatus.CANCELLED
     await db.commit()
@@ -169,8 +170,9 @@ async def websocket_endpoint(websocket: WebSocket, task_id: int, db: AsyncSessio
     result = await db.execute(select(TaskEvent).where(TaskEvent.task_id == task_id).order_by(TaskEvent.created_at))
     events = result.scalars().all()
     for ev in events:
+        ev_type = str(ev.event_type.value).lower() if hasattr(ev.event_type, "value") else str(ev.event_type).lower()
         await websocket.send_text(json.dumps({
-            "type": ev.event_type.value,
+            "type": ev_type,
             "payload": ev.payload,
             "timestamp": ev.created_at.isoformat()
         }))
