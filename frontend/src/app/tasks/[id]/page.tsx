@@ -26,39 +26,49 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
   
   const [task, setTask] = useState<TaskData | null>(null);
   const [events, setEvents] = useState<EventPayload[]>([]);
-  const [showDiff, setShowDiff] = useState(false);
+  const [showDiff, setShowDiff] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  const wsBase = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
 
   // Fetch initial task details
   useEffect(() => {
-    fetch(`http://localhost:8000/api/tasks/${id}`)
-      .then((res) => res.json())
+    fetch(`${apiBase}/api/tasks/${id}`)
+      .then((res) => {
+        if (!res.ok) throw new Error("Task not found");
+        return res.json();
+      })
       .then((data) => setTask(data))
       .catch((err) => console.error("Failed to fetch task", err));
-  }, [id]);
+  }, [id, apiBase]);
 
   // Connect WebSocket
   useEffect(() => {
-    const ws = new WebSocket(`ws://localhost:8000/ws/tasks/${id}`);
+    const ws = new WebSocket(`${wsBase}/ws/tasks/${id}`);
     
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === "status") {
-        const parsed = typeof data.payload === "string" ? JSON.parse(data.payload) : data.payload;
-        setTask((prev) => prev ? { ...prev, status: parsed.status } : null);
-        // Refresh full task to get patch/PR if completed
-        if (parsed.status === "completed" || parsed.status === "failed") {
-          fetch(`http://localhost:8000/api/tasks/${id}`)
-            .then((res) => res.json())
-            .then((d) => setTask(d))
-            .catch(() => {});
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === "status") {
+          const parsed = typeof data.payload === "string" ? JSON.parse(data.payload) : data.payload;
+          setTask((prev) => prev ? { ...prev, status: parsed.status } : null);
+          // Refresh full task to get patch/PR if completed
+          if (parsed.status === "completed" || parsed.status === "failed") {
+            fetch(`${apiBase}/api/tasks/${id}`)
+              .then((res) => res.json())
+              .then((d) => setTask(d))
+              .catch(() => {});
+          }
         }
+        setEvents((prev) => [...prev, data]);
+      } catch (err) {
+        console.error("Failed to parse WS message", err);
       }
-      setEvents((prev) => [...prev, data]);
     };
 
     return () => ws.close();
-  }, [id]);
+  }, [id, apiBase, wsBase]);
 
   // Auto-scroll to bottom of events
   useEffect(() => {
@@ -136,22 +146,24 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
                   {showDiff ? "Collapse" : "Expand"}
                 </button>
               </div>
-              <pre
-                style={{
-                  flex: 1,
-                  overflow: "auto",
-                  fontSize: "0.8rem",
-                  fontFamily: "monospace",
-                  background: "#08080c",
-                  padding: "12px",
-                  borderRadius: "6px",
-                  color: "#98c379",
-                  whiteSpace: "pre-wrap",
-                  lineHeight: "1.4"
-                }}
-              >
-                {task.patch_diff}
-              </pre>
+              {showDiff && (
+                <pre
+                  style={{
+                    flex: 1,
+                    overflow: "auto",
+                    fontSize: "0.8rem",
+                    fontFamily: "monospace",
+                    background: "#08080c",
+                    padding: "12px",
+                    borderRadius: "6px",
+                    color: "#98c379",
+                    whiteSpace: "pre-wrap",
+                    lineHeight: "1.4"
+                  }}
+                >
+                  {task.patch_diff}
+                </pre>
+              )}
             </div>
           )}
         </div>

@@ -15,8 +15,9 @@ export default function Home() {
     if (!prompt.trim() || isSubmitting) return;
 
     setIsSubmitting(true);
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
     try {
-      const res = await fetch("http://localhost:8000/api/tasks", {
+      const res = await fetch(`${apiBase}/api/tasks`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

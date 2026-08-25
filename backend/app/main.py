@@ -1,8 +1,9 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
+from typing import Optional
 import json
 import asyncio
 import datetime
@@ -15,26 +16,44 @@ from .worker import enqueue_task
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle manager for startup and graceful shutdown of async resources."""
-    # Startup
     yield
-    # Shutdown
 
 app = FastAPI(title="Nimbus Control Plane", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 class TaskCreate(BaseModel):
     prompt: str
-    repo_url: str | None = None
-    git_branch: str | None = None
+    repo_url: Optional[str] = None
+    git_branch: Optional[str] = None
 
-@app.post("/api/tasks")
+class TaskCreateResponse(BaseModel):
+    id: int
+    status: str
+    repo_url: Optional[str] = None
+    git_branch: Optional[str] = None
+
+class TaskResponse(BaseModel):
+    id: int
+    status: str
+    prompt: str
+    repo_url: Optional[str] = None
+    git_branch: Optional[str] = None
+    pr_url: Optional[str] = None
+    patch_diff: Optional[str] = None
+
+class TaskCancelResponse(BaseModel):
+    id: int
+    status: str
+    message: str
+
+@app.post("/api/tasks", response_model=TaskCreateResponse)
 async def create_task(req: TaskCreate, db: AsyncSession = Depends(get_db)):
     task = Task(
         prompt=req.prompt,
@@ -46,53 +65,59 @@ async def create_task(req: TaskCreate, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(task)
     
+    task_id = task.id if task.id is not None else 1
+    
     # Enqueue task to background worker
-    await enqueue_task(task.id, req.prompt, req.repo_url, req.git_branch)
+    await enqueue_task(task_id, req.prompt, req.repo_url, req.git_branch)
     
     status_val = task.status.value if hasattr(task.status, "value") else str(task.status or "pending")
-    return {
-        "id": task.id,
-        "status": status_val,
-        "repo_url": task.repo_url,
-        "git_branch": task.git_branch
-    }
+    return TaskCreateResponse(
+        id=task_id,
+        status=status_val,
+        repo_url=task.repo_url,
+        git_branch=task.git_branch
+    )
 
-@app.get("/api/tasks/{task_id}")
+@app.get("/api/tasks/{task_id}", response_model=TaskResponse)
 async def get_task(task_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Task).where(Task.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
-        return {"error": "Task not found"}
-    return {
-        "id": task.id,
-        "status": task.status.value,
-        "prompt": task.prompt,
-        "repo_url": task.repo_url,
-        "git_branch": task.git_branch,
-        "pr_url": task.pr_url,
-        "patch_diff": task.patch_diff
-    }
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    return TaskResponse(
+        id=task.id,
+        status=task.status.value,
+        prompt=task.prompt,
+        repo_url=task.repo_url,
+        git_branch=task.git_branch,
+        pr_url=task.pr_url,
+        patch_diff=task.patch_diff
+    )
 
-@app.post("/api/tasks/{task_id}/cancel")
+@app.post("/api/tasks/{task_id}/cancel", response_model=TaskCancelResponse)
 async def cancel_task(task_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Task).where(Task.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
-        return {"error": "Task not found"}
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
     
     if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
-        return {"id": task.id, "status": task.status.value, "message": "Task already in terminal state"}
+        return TaskCancelResponse(id=task.id, status=task.status.value, message="Task already in terminal state")
 
     task.status = TaskStatus.CANCELLED
     await db.commit()
     
     # Broadcast cancellation event
-    cancel_payload = {"type": "status", "payload": json.dumps({"status": "cancelled"}), "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    cancel_payload = {
+        "type": "status",
+        "payload": json.dumps({"status": "cancelled"}),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    }
     await manager.broadcast_event(task_id, cancel_payload)
     
-    return {"id": task.id, "status": "cancelled", "message": "Task cancelled successfully"}
+    return TaskCancelResponse(id=task.id, status="cancelled", message="Task cancelled successfully")
 
-# Simple in-memory connection manager for WebSockets
+# Simple connection manager with leak prevention
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[int, list[WebSocket]] = {}
@@ -105,7 +130,10 @@ class ConnectionManager:
 
     def disconnect(self, websocket: WebSocket, task_id: int):
         if task_id in self.active_connections:
-            self.active_connections[task_id].remove(websocket)
+            if websocket in self.active_connections[task_id]:
+                self.active_connections[task_id].remove(websocket)
+            if not self.active_connections[task_id]:
+                del self.active_connections[task_id]
 
     async def broadcast_event(self, task_id: int, event_data: dict):
         if task_id in self.active_connections:

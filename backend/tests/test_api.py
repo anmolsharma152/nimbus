@@ -12,7 +12,10 @@ async def test_create_task_endpoint():
     mock_db = AsyncMock()
     mock_db.add = MagicMock()
     mock_db.commit = AsyncMock()
-    mock_db.refresh = AsyncMock()
+    
+    async def mock_refresh(t):
+        t.id = 1
+    mock_db.refresh = AsyncMock(side_effect=mock_refresh)
 
     # Mock enqueue_task so we don't need real Redis
     with patch("app.main.enqueue_task", new_callable=AsyncMock) as mock_enqueue:
@@ -53,10 +56,9 @@ async def test_get_task_not_found():
         response = await ac.get("/api/tasks/99999")
         app.dependency_overrides.clear()
 
-        assert response.status_code == 200
+        assert response.status_code == 404
         data = response.json()
-        assert "error" in data
-        assert data["error"] == "Task not found"
+        assert data["detail"] == "Task not found"
 
 
 @pytest.mark.asyncio

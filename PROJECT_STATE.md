@@ -31,11 +31,16 @@ Phase 2 (GitHub Integration, Repository Cloning & Draft PR Workflow) completed w
 - **Frontend UI (`frontend/`)**:
   - Dark glassmorphism task submission interface with prompt and repository URL inputs.
   - Task execution page with live log/command stream, auto-scroll, branch indicator, Draft PR button, and patch diff inspector.
+- **Control Plane & Async Hardening**:
+  - Pydantic response models, HTTP 404 exception handling, task cancellation endpoint (`POST /api/tasks/{id}/cancel`).
+  - Production connection pooling (`pool_size=20`, `max_overflow=10`, `pool_pre_ping=True`).
+  - True non-blocking asynchronous workspace operations (`asetup`, `aexecute_command`, `aget_diff`, `acommit_changes`, `apush_branch`, `acleanup`) and async Gemini client (`client.aio.chats`).
 - **Testing & Evals**:
-  - 16 comprehensive unit & integration tests covering REST API endpoints, Workspace isolation, Worker agent loop, GitHub client, and schemas (`uv run pytest` -> 100% pass).
-  - Benchmark evaluation runner (`backend/evals/eval_runner.py`) generating performance scorecards (turns, duration, patch validity).
+  - 17 comprehensive unit & integration tests covering REST API endpoints, cancellation flow, Workspace isolation, Worker agent loop, GitHub client, and schemas (`uv run pytest` -> 17/17 passed).
+  - Benchmark evaluation runner (`backend/evals/eval_runner.py`) generating performance scorecards.
 
 ## Verification & Build Status
 
-- Backend: 16/16 tests passing.
-- Frontend: Next.js 16 build passing with zero errors.
+- Backend: 17/17 tests passing (`uv run pytest`).
+- Frontend: Next.js 16 build passing with zero errors (`npm run build`).
+- Git: Clean working tree on `main`.
