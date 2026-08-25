@@ -55,32 +55,46 @@ class LLMChatSession:
                 self._gemini_chat = None
 
     async def _call_gemini(self, prompt: str) -> str:
-        """Tier 1: Google Gemini API with automatic client lifecycle recovery."""
+        """Tier 1: Google Gemini API with automatic client lifecycle recovery and transient retry."""
         if not settings.GEMINI_API_KEY:
             raise ValueError("GEMINI_API_KEY is not configured.")
         
-        if not self._gemini_chat or not self._gemini_client:
-            self._init_gemini_chat()
-            if not self._gemini_chat:
-                raise ValueError("Failed to initialize Gemini chat client.")
-
-        try:
-            response = await self._gemini_chat.send_message(prompt)
-            text = response.text or ""
-            if not text.strip():
-                raise RuntimeError("Gemini returned empty response.")
-            return text
-        except Exception as e:
-            # If client was closed, recreate once and retry
-            if "client has been closed" in str(e).lower():
-                print("[LLM Router] Gemini client connection was closed. Recreating chat session...")
+        last_err = None
+        for attempt in range(1, 4):
+            if not self._gemini_chat or not self._gemini_client:
                 self._init_gemini_chat()
-                if self._gemini_chat:
-                    response = await self._gemini_chat.send_message(prompt)
-                    text = response.text or ""
-                    if text.strip():
-                        return text
-            raise e
+                if not self._gemini_chat:
+                    raise ValueError("Failed to initialize Gemini chat client.")
+
+            try:
+                response = await self._gemini_chat.send_message(prompt)
+                text = response.text or ""
+                if not text.strip():
+                    raise RuntimeError("Gemini returned empty response.")
+                return text
+            except Exception as e:
+                last_err = e
+                err_str = str(e).lower()
+                
+                # If client was closed, recreate chat session immediately
+                if "client has been closed" in err_str:
+                    print(f"[LLM Router] Gemini client connection was closed. Recreating (attempt {attempt}/3)...")
+                    self._init_gemini_chat()
+                    continue
+
+                # If high demand spike (503) or rate limit (429), wait and retry with backoff
+                if "503" in err_str or "unavailable" in err_str or "429" in err_str or "demand" in err_str:
+                    backoff = attempt * 2.0
+                    print(f"[LLM Router] Gemini transient demand spike ({e}). Retrying in {backoff}s (attempt {attempt}/3)...")
+                    await asyncio.sleep(backoff)
+                    continue
+                
+                # For other errors, raise to allow fallback tiers
+                raise e
+
+        if last_err:
+            raise last_err
+        raise RuntimeError("Gemini request failed after 3 attempts.")
 
     async def _call_openai_compatible(
         self,
