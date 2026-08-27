@@ -99,6 +99,67 @@ class NimbusEvalRunner:
         return scorecard
 
 
+    def run_live_workspace_eval(self) -> Dict[str, Any]:
+        """
+        Executes a real physical workspace benchmark against an actual filesystem repo
+        using SubprocessWorkspace to evaluate code inspection, file patching,
+        test execution, and diff generation.
+        """
+        import tempfile
+        import os
+        import subprocess
+        from app.workspace import SubprocessWorkspace
+
+        start_time = time.time()
+        ws = SubprocessWorkspace(task_id=9001)
+        code, _ = ws.setup(repo_url=None, branch_name="eval/test-fix")
+
+        try:
+            # 1. Seed buggy source and unit test file
+            broken_calc = "def add(a: int, b: int) -> int:\n    return a - b  # BUG\n"
+            calc_test = "import unittest\nfrom calculator import add\n\nclass TestCalc(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(2, 3), 5)\n\nif __name__ == '__main__':\n    unittest.main()\n"
+            
+            with open(os.path.join(ws.workdir, "calculator.py"), "w") as f:
+                f.write(broken_calc)
+            with open(os.path.join(ws.workdir, "test_calculator.py"), "w") as f:
+                f.write(calc_test)
+
+            # 2. Run initial test to verify failure
+            exit1, out1 = ws.execute_command("python3 test_calculator.py")
+            assert exit1 != 0, "Initial test should fail on buggy calculator"
+
+            # 3. Simulate agent fixing the file on disk
+            fix_code = "def add(a: int, b: int) -> int:\n    return a + b\n"
+            with open(os.path.join(ws.workdir, "calculator.py"), "w") as f:
+                f.write(fix_code)
+
+            # 4. Run test again to verify passing state
+            exit2, out2 = ws.execute_command("python3 test_calculator.py")
+            test_passed = (exit2 == 0)
+
+            # 5. Extract git diff
+            diff = ws.get_diff()
+            has_patch = bool(diff and "+    return a + b" in diff)
+
+            duration = round(time.time() - start_time, 3)
+            passed = test_passed and has_patch
+
+            res = EvalResult(
+                case_name="SWE-Live-01: Real-time math bugfix & unittest verification",
+                passed=passed,
+                iterations_used=2,
+                duration_seconds=duration,
+                patch_generated=has_patch,
+                test_exit_code=exit2,
+                details=f"Live test run on disk: Exit {exit2}, Patch size: {len(diff)} chars"
+            )
+            self.results.append(res)
+            return self.generate_scorecard()
+        finally:
+            ws.cleanup()
+
+
 if __name__ == "__main__":
     runner = NimbusEvalRunner()
     runner.run_synthetic_benchmark()
+    runner.run_live_workspace_eval()

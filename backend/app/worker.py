@@ -1,5 +1,6 @@
 import asyncio
 import json
+import datetime
 from typing import Optional
 import httpx
 from arq import create_pool
@@ -8,35 +9,48 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from google import genai
 from google.genai import types
 
+from sqlalchemy.future import select
+import shlex
+
 from .db import async_session
-from .models import Task, TaskEvent, EventType, TaskStatus
+from .models import User, UserCredential, Task, TaskEvent, EventType, TaskStatus
 from .settings import settings
 from .workspace import UnifiedWorkspace
 from .github_client import create_draft_pr
 from .llm import LLMChatSession
+from .events import event_bus
 
 
 async def log_event(db: AsyncSession, task_id: int, event_type: EventType, payload_dict: dict):
-    """Persists a task event in PostgreSQL and broadcasts it to the API WebSocket gateway."""
+    """Persists a task event in PostgreSQL and broadcasts it to Redis Event Bus and API gateway."""
     event = TaskEvent(task_id=task_id, event_type=event_type, payload=json.dumps(payload_dict))
     db.add(event)
     await db.commit()
     await db.refresh(event)
 
-    # Post to the main API so it broadcasts via WebSockets
+    ev_type_str = str(event_type.value).lower() if hasattr(event_type, "value") else str(event_type).lower()
+    ts_str = (event.created_at.isoformat() + "Z") if event.created_at else (datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z")
+
+    # 1. Publish to Redis Event Bus (real-time fanout to all API replicas)
+    try:
+        await event_bus.publish_event(task_id, ev_type_str, payload_dict, ts_str)
+    except Exception as e:
+        print(f"Failed to publish to Redis Event Bus: {e}")
+
+    # 2. HTTP fallback to internal endpoint
     try:
         api_base = settings.API_INTERNAL_URL or "http://localhost:8000"
         async with httpx.AsyncClient(timeout=3.0) as client:
             await client.post(
                 f"{api_base.rstrip('/')}/api/internal/tasks/{task_id}/events",
                 json={
-                    "type": str(event_type.value).lower(),
+                    "type": ev_type_str,
                     "payload": json.dumps(payload_dict),
-                    "timestamp": event.created_at.isoformat()
+                    "timestamp": ts_str
                 }
             )
     except Exception as e:
-        print(f"Failed to broadcast event to API: {e}")
+        pass
 
 
 async def run_agent_loop(
@@ -48,29 +62,62 @@ async def run_agent_loop(
 ):
     print(f"Worker picked up task {task_id}: {prompt} (repo: {repo_url}, branch: {git_branch})")
     
-    has_any_llm_key = bool(settings.GEMINI_API_KEY or settings.GROQ_API_KEY or settings.OPENROUTER_API_KEY)
-    if not has_any_llm_key:
-        print("No LLM API keys configured (GEMINI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY). Aborting.")
-        async with async_session() as db:
-            task = await db.get(Task, task_id)
-            if task:
-                task.status = TaskStatus.FAILED
-                await db.commit()
-                await log_event(
-                    db,
-                    task_id,
-                    EventType.LOG,
-                    {"message": "No LLM API keys configured in environment (GEMINI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY)."}
-                )
-                await log_event(db, task_id, EventType.STATUS, {"status": "failed"})
-        return
-
     branch_name = git_branch or f"nimbus/task-{task_id}"
     workspace = UnifiedWorkspace(task_id=task_id)
     
     async with async_session() as db:
         task = await db.get(Task, task_id)
         if not task:
+            return
+
+        # Look up user details and decrypt vault credentials
+        user = None
+        user_github_token = None
+        user_gemini_key = None
+        user_groq_key = None
+        user_openrouter_key = None
+        git_user_name = "Nimbus Agent"
+        git_user_email = "agent@nimbus.ai"
+
+        if task.user_id:
+            user = await db.get(User, task.user_id)
+            if user:
+                git_user_name = user.display_name or user.username
+                git_user_email = user.email or f"{user.username}@users.noreply.github.com"
+                if user.github_token:
+                    user_github_token = decrypt_secret(user.github_token)
+
+                # Fetch any BYOK provider keys from UserCredential vault
+                creds_res = await db.execute(select(UserCredential).where(UserCredential.user_id == user.id))
+                creds = creds_res.scalars().all()
+                for c in creds:
+                    decrypted = decrypt_secret(c.encrypted_value)
+                    if c.provider == "github_pat" and decrypted:
+                        user_github_token = decrypted
+                    elif c.provider == "gemini" and decrypted:
+                        user_gemini_key = decrypted
+                    elif c.provider == "groq" and decrypted:
+                        user_groq_key = decrypted
+                    elif c.provider == "openrouter" and decrypted:
+                        user_openrouter_key = decrypted
+
+        final_github_token = user_github_token or settings.GITHUB_TOKEN
+        has_any_llm_key = bool(
+            user_gemini_key or user_groq_key or user_openrouter_key or
+            settings.GEMINI_API_KEY or settings.GROQ_API_KEY or settings.OPENROUTER_API_KEY
+        )
+
+        if not has_any_llm_key:
+            print("No LLM API keys configured (user BYOK or server environment). Aborting.")
+            task.status = TaskStatus.FAILED
+            await db.commit()
+            await log_event(
+                db,
+                task_id,
+                EventType.LOG,
+                {"message": "No LLM API keys configured. Please configure an API key in Settings or environment."}
+            )
+            await log_event(db, task_id, EventType.STATUS, {"status": "failed"})
             return
         
         task.status = TaskStatus.RUNNING
@@ -81,23 +128,27 @@ async def run_agent_loop(
             db,
             task_id,
             EventType.LOG,
-            {"message": f"Agent initialized. Provisioning isolated workspace on branch '{branch_name}'..."}
+            {"message": f"Agent initialized for @{git_user_name}. Provisioning isolated workspace on branch '{branch_name}'..."}
         )
 
         try:
             _, setup_out = await workspace.asetup(
                 repo_url=repo_url,
                 branch_name=branch_name,
-                github_token=settings.GITHUB_TOKEN
+                github_token=final_github_token
             )
             if setup_out:
                 await log_event(db, task_id, EventType.LOG, {"message": setup_out})
+
+            # Configure user author identity inside the sandbox
+            await workspace.aexecute_command(f"git config user.name {shlex.quote(git_user_name)}")
+            await workspace.aexecute_command(f"git config user.email {shlex.quote(git_user_email)}")
                 
             await log_event(
                 db,
                 task_id,
                 EventType.LOG,
-                {"message": "Docker workspace ready in /workspace/repo. Starting 3-tier LLM reasoning loop..."}
+                {"message": f"Docker workspace ready in /workspace/repo (Author: {git_user_name} <{git_user_email}>). Starting 3-tier LLM reasoning loop..."}
             )
 
             system_instruction = (
@@ -107,18 +158,22 @@ async def run_agent_loop(
                 "and ensure the repository is left in a clean, working state with passing assertions.\n\n"
                 "To execute a bash command (e.g. to inspect files, write code via `cat << 'EOF' > file.py`, run tests, or view git diff), "
                 "output a JSON block strictly formatted as:\n"
-                "```json\n{\n  \"command\": \"<your bash command here>\"\n}\n```\n\n"
+                "```json\n{\n  \"command\": \"<your bash command here>\",\n  \"screenshot\": \"<optional relative path to generated .png file>\",\n  \"caption\": \"<optional screenshot caption>\"\n}\n```\n\n"
                 "CRITICAL Rules:\n"
                 "1. You MUST execute bash commands to write your actual code and test files to disk (e.g. using `cat << 'EOF' > ...` or python). Do NOT just describe code in text.\n"
                 "2. Directly inspect relevant source files with `find`, `grep`, or `cat`.\n"
                 "3. Do NOT run heavy full-stack package installations (`pip install -r requirements.txt`). Instead, write focused tests using standard library unittest, pytest, or mocks (`unittest.mock`).\n"
-                "4. Run `git diff` to verify that your changes are written to disk.\n"
-                "5. ONLY after your code changes are written and verified with git diff, summarize your completed work in markdown without emitting further JSON command blocks."
+                "4. Visual Verification: If your task touches UI, HTML, CSS, or rendering, you may generate image snapshots (e.g. via python Pillow/matplotlib/playwright) and include `\"screenshot\": \"preview.png\"` in your JSON.\n"
+                "5. Run `git diff` to verify that your changes are written to disk.\n"
+                "6. ONLY after your code changes are written and verified with git diff, summarize your completed work in markdown without emitting further JSON command blocks."
             )
 
             llm_session = LLMChatSession(
                 system_instruction=system_instruction,
-                temperature=0.1
+                temperature=0.1,
+                gemini_api_key=user_gemini_key,
+                groq_api_key=user_groq_key,
+                openrouter_api_key=user_openrouter_key
             )
 
             # Agent Loop
@@ -160,11 +215,23 @@ async def run_agent_loop(
                         json_str = text.split("```json")[1].split("```")[0].strip()
                         cmd_obj = json.loads(json_str)
                         command = cmd_obj.get("command", "")
+                        screenshot_file = cmd_obj.get("screenshot")
+                        screenshot_caption = cmd_obj.get("caption") or f"Visual snapshot of {screenshot_file}"
                         
                         await log_event(db, task_id, EventType.COMMAND, {"command": command})
                         
                         # Execute in workspace asynchronously
                         exit_code, output = await workspace.aexecute_command(command)
+                        
+                        # Capture visual screenshot artifact if requested
+                        if screenshot_file:
+                            b64_img = await workspace.aget_file_base64(screenshot_file)
+                            if b64_img:
+                                await log_event(db, task_id, EventType.RESULT, {
+                                    "screenshot": f"data:image/png;base64,{b64_img}",
+                                    "filename": screenshot_file.split("/")[-1],
+                                    "caption": screenshot_caption
+                                })
                         
                         # Limit output length to prevent context explosion
                         if len(output) > 10000:
@@ -196,16 +263,17 @@ async def run_agent_loop(
                 await workspace.acommit_changes(f"Nimbus: {prompt[:60]}")
                 
                 # Push branch and open Draft PR if repo_url and token exist
-                if repo_url and settings.GITHUB_TOKEN:
+                if repo_url and final_github_token:
                     await log_event(db, task_id, EventType.LOG, {"message": f"Pushing branch '{branch_name}' to GitHub..."})
-                    push_code, push_out = await workspace.apush_branch(branch_name, repo_url, settings.GITHUB_TOKEN)
+                    push_code, push_out = await workspace.apush_branch(branch_name, repo_url, final_github_token)
                     if push_code == 0:
+                        author_tag = f"@{user.username}" if user else "Nimbus Agent"
                         pr_url = await create_draft_pr(
                             repo_url=repo_url,
                             title=f"Nimbus Agent: {prompt[:60]}",
-                            body=f"### Automated Pull Request by Nimbus\n\n**Task #{task_id}**\n\n**Prompt:**\n{prompt}\n\n### Changes Generated:\n```diff\n{diff_text[:3000]}\n```",
+                            body=f"### Automated Pull Request by Nimbus\n\n**Task #{task_id}**\n**Author:** {author_tag}\n\n**Prompt:**\n{prompt}\n\n### Changes Generated:\n```diff\n{diff_text[:3000]}\n```",
                             head_branch=branch_name,
-                            token=settings.GITHUB_TOKEN
+                            token=final_github_token
                         )
                         if pr_url:
                             task.pr_url = pr_url

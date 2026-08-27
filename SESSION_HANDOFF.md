@@ -1,52 +1,62 @@
 # Session Handoff
 
-## Current Work Session
+## Current Work Session (August 27, 2026)
 
-Building the Nimbus control-plane prototype (FastAPI + arq worker + Docker workspace + Gemini agent loop) and a Next.js 16 frontend per `architecture_plan.md`. All implementation is untracked; committed Git history only covers docs and research.
+Nimbus has evolved from early prototypes into a fully functional, cloud-deployed autonomous software engineering agent platform. The system features a trusted FastAPI control plane with asynchronous `asyncpg` connection pooling, an `arq` background worker driving a 3-tier multi-LLM reasoning loop (Gemini 3.6/3.7/3.5, Groq `openai/gpt-oss-120b`, OpenRouter `cohere/north-mini-code:free`), ephemeral Docker sandbox isolation with Linux cgroups/resource caps, live WebSocket flight recording with historical event replay, and automated GitHub Draft PR dispatch.
+
+---
 
 ## What Was Completed
 
-- Backend: task + event models, Alembic initial migration, REST create/get, WebSocket endpoint with history replay, arq/Redis queue, `DockerWorkspace` create/exec/cleanup, Gemini agent loop with JSON command parsing and status/event logging.
-- Frontend: home submit form → `POST /api/tasks`; `tasks/[id]` page with live WebSocket stream, auto-scroll, status badge.
-- Infra: docker-compose switched to an external `homelab` network (shared Postgres/Redis); `.env` configured.
+- **Multi-Tier LLM Reasoning Loop (`backend/app/llm.py`)**:
+  - 3-tier automatic failover hierarchy: Tier 1 (Intra-Gemini pool with 3.6-flash, 3.7-flash, 3.5-flash) → Tier 2 (Groq GPT-OSS 120B with context window truncation) → Tier 3 (OpenRouter free tier).
+  - Exponential backoff with jitter for transient 429/503 rate limits and a 5-minute stall watchdog.
+  - Enforced disk file write verification before agent final summaries.
+- **Docker Sandbox Hardening (`backend/app/workspace.py`)**:
+  - Ephemeral container lifecycle with `mem_limit="1g"`, `nano_cpus=2_000_000_000`, `pids_limit=256`, `cap_drop=["ALL"]`, `security_opt=["no-new-privileges:true"]`, and 300s execution timeouts.
+  - Non-blocking `asyncio.to_thread` execution wrappers and transient header Git authentication (`http.extraheader`) keeping tokens out of `.git/config`.
+- **Control Plane & WebSocket Replay (`backend/app/main.py`)**:
+  - REST endpoints for task creation, status inspection, cancellation (`POST /api/tasks/{id}/cancel`), and retries (`POST /api/tasks/{id}/retry`).
+  - Memory leak prevention in `ConnectionManager` and UTC timestamp normalization.
+- **Frontend Modernization (`frontend/`)**:
+  - Next.js 16 (React 19, Turbopack) dark glassmorphic console with clean White Cloud branding.
+  - Full 100-repository dynamic selector, user/org switcher, prompt presets, split-view task inspector, and copy logs.
+  - Settings Modal for custom API key configuration.
+  - Rich OpenGraph/Twitter card SEO metadata and JSON-LD schema.
+- **Testing & Verification**:
+  - **46/46 Pytest backend tests passing** (`test_api`, `test_auth`, `test_browser`, `test_credentials`, `test_evals`, `test_github_client`, `test_llm`, `test_scaling`, `test_worker`, `test_workspace`).
+  - **Next.js 16 production build passing with 0 errors** across all static/dynamic routes (`/`, `/login`, `/onboarding`, `/settings`, `/tasks/[id]`, `/about`, `/architecture`, `/security`).
+  - Deployed live on Render + Neon PostgreSQL + Upstash Redis + Vercel (`https://nimbusagent.vercel.app`).
 
-## What Is In Progress
+---
 
-- Verifying the end-to-end loop locally: submit → worker → Docker → events → WebSocket UI.
-- Phase 1 gap: the workspace has no repository clone; the agent cannot run project tests or produce a patch.
-- `docs/architecture.md` pgvector edits are uncommitted.
+## Immediate Next Milestone: Multi-Tenant Platform & Onboarding
 
-## Files Touched Recently
+Transform Nimbus from a single-tenant prototype with hardcoded GitHub username/server tokens into a **user-agnostic, multi-tenant consumer platform**:
 
-- `backend/app/worker.py`, `backend/app/settings.py` (Aug 12)
-- `docs/architecture.md` (uncommitted)
-- `frontend/src/app/page.tsx`, `frontend/src/app/tasks/[id]/page.tsx`
-- `docker-compose.yml`, `.env`
+1. **Phase 1: Identity & Access Control**:
+   - GitHub OAuth 2.0 flow (`/api/auth/github/login`, `/api/auth/github/callback`, `/api/auth/me`).
+   - Secure HTTP-only JWT sessions.
+   - `User` model (`id`, `github_id`, `username`, `email`, `avatar_url`) and `user_id` foreign key on `tasks`.
+   - User-scoped task access and live repository discovery (`GET /api/repos` via user's OAuth token).
+2. **Phase 2: Onboarding & Credential Vault**:
+   - Fernet-encrypted `UserCredential` table for per-user token and BYOK LLM key storage.
+   - 4-step onboarding wizard (`/onboarding`).
+   - User-attributed git commits (`git config user.name/email`) and PR authoring under the user's GitHub identity.
+   - Elimination of localStorage credentials in favor of server-backed vault.
+3. **Phase 3: Event Scaling & WebSocket Auth**:
+   - Redis Streams / Pub-Sub event fan-out across multiple API instances.
+   - Authenticated WebSocket handshakes.
 
-## Important Decisions
+---
 
-- Shared homelab Postgres/Redis instead of standalone containers (docker-compose.yml).
-- Manual LLM JSON→command protocol chosen over Gemini function-calling to keep async event logging simple (worker.py comment).
-- Worker posts events to the API over HTTP for broadcast; worker stays a separate process from the API.
-- Event types are a closed set (log/command/result/status), not yet the `task.*` contract in `docs/architecture.md`.
+## Key Files Reference
 
-## Current Blockers
-
-- Settings default DB port 5555 vs compose comments (5434/5432) — confirm the real homelab mapping before running.
-- `GEMINI_API_KEY` must be set in `backend/.env`; the worker aborts without it.
-- Everything is uncommitted — no shared history.
-
-## Immediate Next Action
-
-Run the backend against the real Postgres/Redis and exercise one full task end-to-end; then commit the working tree.
-
-## First Prompt For The Next Agent
-
-"Commit the Nimbus implementation (backend, frontend, docker-compose, docs changes) with clear messages, then make a Phase-1 task clone a fixture repo in the Docker workspace and produce a tested patch with a complete event timeline."
-
-## Roadmap Review
-
-- Phase 0: near-complete (cancel flow missing).
-- Phase 1: partial — workspace + agent loop only; no clone/test/patch.
-- Phases 2–4 (GitHub App, replay/approvals, browser): not started.
-- Priorities unchanged from `docs/roadmap.md`.
+- `backend/app/main.py`: FastAPI control plane routes & WebSocket connection manager.
+- `backend/app/worker.py`: `arq` worker orchestrating agent lifecycle and git operations.
+- `backend/app/workspace.py`: Ephemeral Docker and Subprocess workspace sandboxes.
+- `backend/app/llm.py`: 3-tier resilient LLM chat session with failover routing.
+- `backend/app/github_client.py`: GitHub REST API client for Draft PR generation.
+- `frontend/src/app/page.tsx`: Main task submission console.
+- `frontend/src/app/tasks/[id]/page.tsx`: Real-time streaming terminal & patch diff inspector.
+- `TASKS.md` / `docs/roadmap.md`: Sequenced multi-phase roadmap and execution checklist.

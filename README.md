@@ -14,8 +14,8 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%20(asyncpg)-336791?logo=postgresql&logoColor=white)](https://postgresql.org)
 [![Redis](https://img.shields.io/badge/Redis-7%20(arq)-DC382D?logo=redis&logoColor=white)](https://redis.io)
 [![Docker](https://img.shields.io/badge/Docker-Sandboxed%20microVM-2496ED?logo=docker&logoColor=white)](https://docker.com)
-[![Gemini 2.5](https://img.shields.io/badge/LLM-Google%20Gemini%202.5-8E75B2?logo=google&logoColor=white)](https://ai.google.dev)
-[![Tests](https://img.shields.io/badge/Tests-19%2F19%20Passing-brightgreen?logo=pytest&logoColor=white)](#testing--evals-benchmark)
+[![3-Tier LLM](https://img.shields.io/badge/LLM-3--Tier%20Multi--LLM%20Routing-8E75B2?logo=google&logoColor=white)](https://ai.google.dev)
+[![Tests](https://img.shields.io/badge/Tests-46%2F46%20Passing-brightgreen?logo=pytest&logoColor=white)](#testing--evals-benchmark)
 
 <p align="center">
   <b>🌐 <a href="https://nimbusagent.vercel.app/">Live Web App</a></b> &nbsp;|&nbsp;
@@ -316,15 +316,20 @@ uv run pytest
 
 ```text
 ============================== test session starts ==============================
-collected 17 items
+collected 46 items
 
-tests/test_api.py .....                                                  [ 29%]
-tests/test_evals.py .                                                    [ 35%]
-tests/test_github_client.py ...                                          [ 52%]
-tests/test_worker.py ...                                                 [ 70%]
+tests/test_api.py ........                                               [ 17%]
+tests/test_auth.py ........                                              [ 34%]
+tests/test_browser.py ...                                                [ 41%]
+tests/test_credentials.py .....                                          [ 52%]
+tests/test_evals.py ..                                                   [ 56%]
+tests/test_github_client.py ...                                          [ 63%]
+tests/test_llm.py ....                                                   [ 71%]
+tests/test_scaling.py ....                                               [ 80%]
+tests/test_worker.py ....                                                [ 89%]
 tests/test_workspace.py .....                                            [100%]
 
-============================== 17 passed in 3.79s ==============================
+============================== 46 passed in 7.43s ==============================
 ```
 
 ### Running Autonomous Agent Evaluation Benchmark

@@ -143,6 +143,15 @@ class DockerWorkspace:
             code, out = self.execute_command("git diff", workdir=self.workdir)
         return out.strip()
 
+    def get_file_base64(self, file_path: str) -> Optional[str]:
+        """Reads a binary file inside container and returns its base64 encoded string."""
+        if not self.container:
+            return None
+        code, out = self.execute_command(f"base64 -w 0 {shlex.quote(file_path)}", workdir=self.workdir)
+        if code == 0 and out.strip():
+            return out.strip()
+        return None
+
     def commit_changes(self, message: str = "Nimbus agent automated changes") -> Tuple[int, str]:
         clean_msg = message.replace("'", "").replace("\n", " ").strip()[:100]
         return self.execute_command(
@@ -274,6 +283,17 @@ class SubprocessWorkspace:
             code, out = self.execute_command("git diff", workdir=self.workdir)
         return out.strip()
 
+    def get_file_base64(self, file_path: str) -> Optional[str]:
+        """Reads a binary file inside local subprocess workdir and returns its base64 encoded string."""
+        full_path = os.path.join(self.workdir, file_path) if not os.path.isabs(file_path) else file_path
+        if os.path.exists(full_path):
+            try:
+                with open(full_path, "rb") as f:
+                    return base64.b64encode(f.read()).decode("utf-8")
+            except Exception:
+                return None
+        return None
+
     def commit_changes(self, message: str = "Nimbus agent automated changes") -> Tuple[int, str]:
         clean_msg = message.replace("'", "").replace("\n", " ").strip()[:100]
         return self.execute_command(
@@ -346,6 +366,9 @@ class UnifiedWorkspace:
 
     async def aget_diff(self) -> str:
         return await asyncio.to_thread(self.impl.get_diff)
+
+    async def aget_file_base64(self, file_path: str) -> Optional[str]:
+        return await asyncio.to_thread(self.impl.get_file_base64, file_path)
 
     async def acommit_changes(self, message: str = "Nimbus agent automated changes") -> Tuple[int, str]:
         return await asyncio.to_thread(self.impl.commit_changes, message)
