@@ -22,11 +22,18 @@ class LLMChatSession:
         self,
         system_instruction: str,
         temperature: float = 0.1,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
+        gemini_api_key: Optional[str] = None,
+        groq_api_key: Optional[str] = None,
+        openrouter_api_key: Optional[str] = None
     ):
         self.system_instruction = system_instruction
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.gemini_api_key = gemini_api_key or settings.GEMINI_API_KEY
+        self.groq_api_key = groq_api_key or settings.GROQ_API_KEY
+        self.openrouter_api_key = openrouter_api_key or settings.OPENROUTER_API_KEY
+
         # Unified message history for OpenAI-compatible endpoints: [{"role": "...", "content": "..."}]
         self.messages: List[Dict[str, str]] = [
             {"role": "system", "content": self.system_instruction}
@@ -40,9 +47,9 @@ class LLMChatSession:
 
     def _init_gemini_chat(self, model_override: Optional[str] = None):
         """Initializes and holds a persistent reference to the Gemini API Client and Async Chat."""
-        if settings.GEMINI_API_KEY:
+        if self.gemini_api_key:
             try:
-                self._gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
+                self._gemini_client = genai.Client(api_key=self.gemini_api_key)
                 model_name = model_override or self._gemini_models[self._current_model_idx % len(self._gemini_models)]
                 self._gemini_chat = self._gemini_client.aio.chats.create(
                     model=model_name,
@@ -183,21 +190,21 @@ class LLMChatSession:
 
     async def _call_groq(self) -> str:
         """Tier 2: Groq Clean Models (openai/gpt-oss-120b). Sends truncated context to stay within 8k token limit."""
-        if not settings.GROQ_API_KEY:
+        if not self.groq_api_key:
             raise ValueError("GROQ_API_KEY is not configured.")
         
         model = settings.GROQ_MODEL or "openai/gpt-oss-120b"
         # Groq free tier: 8000 TPM hard cap. Send truncated history to be safe.
         return await self._call_openai_compatible(
             base_url="https://api.groq.com/openai/v1",
-            api_key=settings.GROQ_API_KEY,
+            api_key=self.groq_api_key,
             model=model,
             truncate_to_tokens=5500
         )
 
     async def _call_openrouter(self) -> str:
         """Tier 3: OpenRouter Free Tier."""
-        if not settings.OPENROUTER_API_KEY:
+        if not self.openrouter_api_key:
             raise ValueError("OPENROUTER_API_KEY is not configured.")
         
         model = settings.OPENROUTER_MODEL or "cohere/north-mini-code:free"
@@ -207,7 +214,7 @@ class LLMChatSession:
         }
         return await self._call_openai_compatible(
             base_url="https://openrouter.ai/api/v1",
-            api_key=settings.OPENROUTER_API_KEY,
+            api_key=self.openrouter_api_key,
             model=model,
             headers_extra=headers_extra
         )

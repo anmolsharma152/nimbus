@@ -41,6 +41,30 @@ class Settings(BaseSettings):
         default=None,
         description="GitHub personal access token for cloning and PR creation."
     )
+    GITHUB_CLIENT_ID: str | None = Field(
+        default=None,
+        description="GitHub OAuth App Client ID."
+    )
+    GITHUB_CLIENT_SECRET: str | None = Field(
+        default=None,
+        description="GitHub OAuth App Client Secret."
+    )
+    JWT_SECRET_KEY: str = Field(
+        default="nimbus-super-secure-jwt-key-2026-change-in-prod",
+        description="Secret key for signing session JWT tokens."
+    )
+    JWT_ALGORITHM: str = Field(
+        default="HS256",
+        description="Algorithm for signing session JWT tokens."
+    )
+    JWT_EXPIRE_MINUTES: int = Field(
+        default=10080,
+        description="Session JWT token validity in minutes (7 days)."
+    )
+    FRONTEND_URL: str = Field(
+        default="http://localhost:3000",
+        description="Frontend web application base URL for OAuth redirects."
+    )
     MAX_AGENT_ITERATIONS: int = Field(
         default=20,
         description="Maximum turns allowed for an agent task."
