@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import styles from "./SettingsModal.module.css";
+import { useAuth } from "../context/AuthContext";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -9,6 +10,7 @@ interface SettingsModalProps {
 }
 
 export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
+  const { user, isAuthenticated } = useAuth();
   const [geminiKey, setGeminiKey] = useState("");
   const [geminiModel, setGeminiModel] = useState("gemini-3.6-flash");
   const [groqKey, setGroqKey] = useState("");
@@ -16,38 +18,108 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [openrouterKey, setOpenrouterKey] = useState("");
   const [openrouterModel, setOpenrouterModel] = useState("cohere/north-mini-code:free");
   const [githubToken, setGithubToken] = useState("");
+  
+  const [configuredProviders, setConfiguredProviders] = useState<{ [key: string]: boolean }>({});
+  const [isSaving, setIsSaving] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
 
+  const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
+
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      setGeminiKey(localStorage.getItem("nimbus_gemini_key") || "");
-      setGeminiModel(localStorage.getItem("nimbus_gemini_model") || "gemini-3.6-flash");
-      setGroqKey(localStorage.getItem("nimbus_groq_key") || "");
-      setGroqModel(localStorage.getItem("nimbus_groq_model") || "openai/gpt-oss-120b");
-      setOpenrouterKey(localStorage.getItem("nimbus_openrouter_key") || "");
-      setOpenrouterModel(localStorage.getItem("nimbus_openrouter_model") || "cohere/north-mini-code:free");
-      setGithubToken(localStorage.getItem("nimbus_github_token") || "");
+    if (!isOpen) return;
+
+    if (isAuthenticated) {
+      // Fetch status from backend credential vault
+      fetch(`${apiBase}/api/settings/credentials`, { credentials: "include" })
+        .then((res) => (res.ok ? res.json() : []))
+        .then((data) => {
+          if (Array.isArray(data)) {
+            const map: { [key: string]: boolean } = {};
+            data.forEach((item: { provider: string; configured: boolean }) => {
+              map[item.provider] = item.configured;
+            });
+            setConfiguredProviders(map);
+          }
+        })
+        .catch((err) => console.warn("Failed to fetch vault credentials:", err));
     }
-  }, [isOpen]);
+
+    if (typeof window !== "undefined") {
+      setGeminiModel(localStorage.getItem("nimbus_gemini_model") || "gemini-3.6-flash");
+      setGroqModel(localStorage.getItem("nimbus_groq_model") || "openai/gpt-oss-120b");
+      setOpenrouterModel(localStorage.getItem("nimbus_openrouter_model") || "cohere/north-mini-code:free");
+    }
+  }, [isOpen, isAuthenticated, apiBase]);
 
   if (!isOpen) return null;
 
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (typeof window !== "undefined") {
-      localStorage.setItem("nimbus_gemini_key", geminiKey.trim());
-      localStorage.setItem("nimbus_gemini_model", geminiModel);
-      localStorage.setItem("nimbus_groq_key", groqKey.trim());
-      localStorage.setItem("nimbus_groq_model", groqModel);
-      localStorage.setItem("nimbus_openrouter_key", openrouterKey.trim());
-      localStorage.setItem("nimbus_openrouter_model", openrouterModel);
-      localStorage.setItem("nimbus_github_token", githubToken.trim());
+    setIsSaving(true);
+
+    try {
+      if (typeof window !== "undefined") {
+        localStorage.setItem("nimbus_gemini_model", geminiModel);
+        localStorage.setItem("nimbus_groq_model", groqModel);
+        localStorage.setItem("nimbus_openrouter_model", openrouterModel);
+      }
+
+      // If user is logged in, sync non-empty keys to backend encrypted vault
+      if (isAuthenticated) {
+        const promises = [];
+        if (geminiKey.trim()) {
+          promises.push(
+            fetch(`${apiBase}/api/settings/credentials/gemini`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({ value: geminiKey.trim() }),
+            })
+          );
+        }
+        if (groqKey.trim()) {
+          promises.push(
+            fetch(`${apiBase}/api/settings/credentials/groq`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({ value: groqKey.trim() }),
+            })
+          );
+        }
+        if (openrouterKey.trim()) {
+          promises.push(
+            fetch(`${apiBase}/api/settings/credentials/openrouter`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({ value: openrouterKey.trim() }),
+            })
+          );
+        }
+        if (githubToken.trim()) {
+          promises.push(
+            fetch(`${apiBase}/api/settings/credentials/github_pat`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({ value: githubToken.trim() }),
+            })
+          );
+        }
+        await Promise.all(promises);
+      }
+
+      setSavedSuccess(true);
+      setTimeout(() => {
+        setSavedSuccess(false);
+        onClose();
+      }, 1200);
+    } catch (err) {
+      console.error("Failed to save credentials:", err);
+    } finally {
+      setIsSaving(false);
     }
-    setSavedSuccess(true);
-    setTimeout(() => {
-      setSavedSuccess(false);
-      onClose();
-    }, 1200);
   };
 
   return (
