@@ -17,7 +17,6 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [groqModel, setGroqModel] = useState("openai/gpt-oss-120b");
   const [openrouterKey, setOpenrouterKey] = useState("");
   const [openrouterModel, setOpenrouterModel] = useState("cohere/north-mini-code:free");
-  const [githubToken, setGithubToken] = useState("");
   
   const [configuredProviders, setConfiguredProviders] = useState<{ [key: string]: boolean }>({});
   const [isSaving, setIsSaving] = useState(false);
@@ -94,16 +93,6 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               headers: { "Content-Type": "application/json" },
               credentials: "include",
               body: JSON.stringify({ value: openrouterKey.trim() }),
-            })
-          );
-        }
-        if (githubToken.trim()) {
-          promises.push(
-            fetch(`${apiBase}/api/settings/credentials/github_pat`, {
-              method: "PUT",
-              headers: { "Content-Type": "application/json" },
-              credentials: "include",
-              body: JSON.stringify({ value: githubToken.trim() }),
             })
           );
         }
@@ -208,26 +197,6 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 <option value="cohere/north-mini-code:free">cohere/north-mini-code:free</option>
                 <option value="google/gemma-4-31b-it:free">google/gemma-4-31b-it:free</option>
               </select>
-            </div>
-          </div>
-
-          {/* GitHub Personal Access Token */}
-          <div className={styles.providerCard}>
-            <div className={styles.providerHeader}>
-              <span className={styles.tierBadgeGit}>Git &amp; PR Dispatch</span>
-              <h3 className={styles.providerName}>GitHub Personal Access Token (PAT)</h3>
-            </div>
-            <p className={styles.cardDesc}>
-              Allows Nimbus to clone <strong>both Public and Private repositories</strong>, push branch commits, and automatically open Draft Pull Requests.
-            </p>
-            <div className={styles.inputGroup}>
-              <label>GitHub Token (<code>ghp_...</code> or <code>github_pat_...</code>)</label>
-              <input
-                type="password"
-                placeholder="ghp_..."
-                value={githubToken}
-                onChange={(e) => setGithubToken(e.target.value)}
-              />
             </div>
           </div>
 

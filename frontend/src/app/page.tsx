@@ -147,6 +147,152 @@ export default function Home() {
     (r.description && r.description.toLowerCase().includes(repoSearchFilter.toLowerCase()))
   );
 
+  // 1. GUEST / FIRST-TIME VISITOR LANDING PAGE
+  if (!isAuthenticated && !isAuthLoading) {
+    return (
+      <main className={styles.main}>
+        <div className={styles.landingContainer}>
+          {/* Top Nav */}
+          <nav className={styles.landingNav}>
+            <div className={styles.brandLogo} style={{ marginBottom: 0 }}>
+              <svg className={styles.cloudSvg} viewBox="0 0 64 64" fill="none" style={{ width: "32px", height: "32px" }}>
+                <path
+                  d="M47 45C52.5228 45 57 40.5228 57 35C57 29.7909 53.0125 25.5126 47.9404 25.0487C46.6105 17.0381 39.6836 11 31.3333 11C22.0506 11 14.3752 18.2023 13.7212 27.3533C9.94825 28.5029 7 32.0267 7 36.3333C7 41.12 10.88 45 15.6667 45H47Z"
+                  fill="#ffffff"
+                />
+              </svg>
+              <span className={styles.brandTitle} style={{ fontSize: "1.5rem" }}>Nimbus</span>
+            </div>
+
+            <div className={styles.landingNavLinks}>
+              <Link href="/architecture" className={styles.footerLink}>Architecture</Link>
+              <Link href="/security" className={styles.footerLink}>Security</Link>
+              <Link href="/about" className={styles.footerLink}>About</Link>
+              <button
+                type="button"
+                className={styles.primaryGithubBtn}
+                onClick={login}
+                style={{ padding: "8px 18px", fontSize: "0.85rem" }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                  <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" />
+                </svg>
+                <span>Sign In with GitHub</span>
+              </button>
+            </div>
+          </nav>
+
+          {/* Hero Section */}
+          <section className={styles.landingHero}>
+            <div className={styles.landingBadge}>
+              <span>✨ Autonomous Cloud Software Engineer</span>
+            </div>
+            <h1 className={styles.landingHeadline}>
+              Delegate Codebases to <span className={styles.landingHeadlineGradient}>Zero-Trust AI Sandboxes</span>
+            </h1>
+            <p className={styles.landingSubtitle}>
+              Nimbus autonomously inspects repositories, modifies code on disk, runs assertions, and dispatches verified Draft Pull Requests authored under your GitHub identity.
+            </p>
+            <div className={styles.landingCtaRow}>
+              <button type="button" className={styles.primaryGithubBtn} onClick={login}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                  <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" />
+                </svg>
+                <span>Get Started with GitHub ➔</span>
+              </button>
+              <Link href="/architecture" className={styles.secondaryLinkBtn}>
+                Explore Architecture →
+              </Link>
+            </div>
+          </section>
+
+          {/* Features Grid */}
+          <div className={styles.featuresGrid}>
+            <div className={styles.featureCard}>
+              <span className={styles.featureIcon}>🐳</span>
+              <h3 className={styles.featureTitle}>Hardened Sandboxes</h3>
+              <p className={styles.featureDesc}>
+                Each task executes inside an ephemeral microVM container with strict cgroups memory & CPU limits, dropped capabilities, and no-new-privileges flags.
+              </p>
+            </div>
+            <div className={styles.featureCard}>
+              <span className={styles.featureIcon}>🧠</span>
+              <h3 className={styles.featureTitle}>3-Tier Multi-LLM Routing</h3>
+              <p className={styles.featureDesc}>
+                Intra-Gemini primary flash pool with instant automatic failover to Groq (GPT-OSS-120B) and OpenRouter fallback for zero downtime.
+              </p>
+            </div>
+            <div className={styles.featureCard}>
+              <span className={styles.featureIcon}>📡</span>
+              <h3 className={styles.featureTitle}>Live Flight Telemetry</h3>
+              <p className={styles.featureDesc}>
+                Sub-second log streaming, terminal command playback, live git diff generation, and visual screenshot verification via WebSockets.
+              </p>
+            </div>
+            <div className={styles.featureCard}>
+              <span className={styles.featureIcon}>🚀</span>
+              <h3 className={styles.featureTitle}>Automated Draft PRs</h3>
+              <p className={styles.featureDesc}>
+                Seamless GitHub OAuth 2.0 integration — no manual personal access tokens required. Commits are authored under your verified developer account.
+              </p>
+            </div>
+          </div>
+
+          {/* 3-Step Workflow */}
+          <section className={styles.workflowSection}>
+            <h2 className={styles.sectionTitle}>How Nimbus Works</h2>
+            <div className={styles.stepsRow}>
+              <div className={styles.stepCard}>
+                <span className={styles.stepNumber}>Step 01</span>
+                <h3 className={styles.stepTitle}>Connect Repository</h3>
+                <p className={styles.stepDesc}>
+                  Sign in with GitHub and select any public or private repository. Nimbus clones the repo into an isolated sandbox environment.
+                </p>
+              </div>
+              <div className={styles.stepCard}>
+                <span className={styles.stepNumber}>Step 02</span>
+                <h3 className={styles.stepTitle}>Delegate Directive</h3>
+                <p className={styles.stepDesc}>
+                  Describe your task in natural language. The autonomous agent inspects source code, edits files, and runs tests to verify assertions.
+                </p>
+              </div>
+              <div className={styles.stepCard}>
+                <span className={styles.stepNumber}>Step 03</span>
+                <h3 className={styles.stepTitle}>Review &amp; Merge</h3>
+                <p className={styles.stepDesc}>
+                  Inspect live terminal execution logs, view the generated patch diff, and merge the automatically created Draft Pull Request.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          {/* CTA Banner */}
+          <div className={styles.ctaBanner}>
+            <h2 className={styles.ctaBannerTitle}>Ready to delegate your next coding task?</h2>
+            <p className={styles.ctaBannerSub}>
+              Connect your GitHub account in seconds. Zero complex local setup required.
+            </p>
+            <button type="button" className={styles.primaryGithubBtn} onClick={login}>
+              <span>Launch Nimbus with GitHub ➔</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <footer className={styles.footer}>
+          <span>Nimbus &copy; {new Date().getFullYear()}</span>
+          <div className={styles.footerLinks}>
+            <Link href="/architecture" className={styles.footerLink}>Architecture</Link>
+            <Link href="/security" className={styles.footerLink}>Security</Link>
+            <Link href="/about" className={styles.footerLink}>About</Link>
+            <a href="https://github.com" target="_blank" rel="noopener noreferrer" className={styles.footerLink}>GitHub</a>
+          </div>
+        </footer>
+      </main>
+    );
+  }
+
+  // 2. AUTHENTICATED AGENT CONTROL PLANE
   return (
     <main className={styles.main}>
       <div className={styles.contentWrapper}>

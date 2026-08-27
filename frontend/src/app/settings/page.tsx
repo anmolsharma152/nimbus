@@ -113,12 +113,6 @@ export default function SettingsPage() {
       desc: "Tertiary failover accessing open weights models like Cohere North Mini Code and Gemma.",
       placeholder: "sk-or-v1-...",
     },
-    github_pat: {
-      name: "GitHub Personal Access Token (PAT)",
-      tier: "Git & PRs",
-      desc: "Fine-grained personal access token override for private repository cloning and user-attributed Draft PR dispatch.",
-      placeholder: "github_pat_... or ghp_...",
-    },
   };
 
   return (
@@ -128,7 +122,7 @@ export default function SettingsPage() {
           <h1 className={styles.title}>Settings &amp; Credential Vault</h1>
         </div>
         <p className={styles.subtitle}>
-          Manage your personal BYOK LLM API keys and GitHub tokens. All secrets are encrypted at rest with Fernet AES-256 before being written to PostgreSQL.
+          Manage your personal BYOK LLM API keys. All keys are encrypted at rest with Fernet AES-256 before being stored. GitHub access is securely managed via your GitHub OAuth session.
         </p>
       </header>
 
@@ -176,7 +170,7 @@ export default function SettingsPage() {
 
       {/* Encrypted Vault Section */}
       <section className={styles.section}>
-        <h2 className={styles.sectionTitle}>Encrypted AI &amp; Git Credentials</h2>
+        <h2 className={styles.sectionTitle}>Encrypted AI Provider Keys (BYOK)</h2>
 
         {statusMsg && (
           <div style={{ marginBottom: "16px", padding: "10px 14px", borderRadius: "8px", background: "rgba(255, 255, 255, 0.05)", fontSize: "0.85rem", color: "#f4f4f5" }}>
@@ -185,7 +179,7 @@ export default function SettingsPage() {
         )}
 
         <div className={styles.vaultGrid}>
-          {["gemini", "groq", "openrouter", "github_pat"].map((providerKey) => {
+          {["gemini", "groq", "openrouter"].map((providerKey) => {
             const meta = providerMeta[providerKey];
             const statusItem = credentials.find((c) => c.provider === providerKey);
             const isConfigured = statusItem?.configured ?? false;

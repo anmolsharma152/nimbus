@@ -129,9 +129,9 @@ async def list_user_repositories(
         if not target_username:
             target_username = user.username
 
-    # If no authenticated user and no override provided, fallback to default showcase user
-    if not target_username:
-        target_username = "anmolsharma152"
+    # If no authenticated user and no override provided, return empty list
+    if not target_username and not token:
+        return []
 
     headers: Dict[str, str] = {
         "Accept": "application/vnd.github+json",

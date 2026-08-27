@@ -14,7 +14,7 @@ from .security import encrypt_secret, decrypt_secret
 
 router = APIRouter(prefix="/api/settings/credentials", tags=["credentials"])
 
-ALLOWED_PROVIDERS = {"gemini", "groq", "openrouter", "github_pat"}
+ALLOWED_PROVIDERS = {"gemini", "groq", "openrouter"}
 
 
 class CredentialItem(BaseModel):

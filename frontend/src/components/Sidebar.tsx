@@ -135,6 +135,10 @@ export default function Sidebar() {
     }
   };
 
+  if (!isAuthenticated && (pathname === "/" || pathname === "/login" || pathname === "/onboarding")) {
+    return null;
+  }
+
   return (
     <aside className={`${styles.sidebar} ${collapsed ? styles.collapsed : ""}`}>
       {/* Brand & Toggle */}
