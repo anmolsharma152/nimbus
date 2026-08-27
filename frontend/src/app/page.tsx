@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import styles from "./page.module.css";
 import SettingsModal from "../components/SettingsModal";
+import { useAuth } from "../context/AuthContext";
 
 const PROMPT_PRESETS = [
   {
@@ -33,9 +34,11 @@ interface GitHubRepo {
   stargazers_count: number;
   language: string | null;
   description: string | null;
+  private?: boolean;
 }
 
 export default function Home() {
+  const { user, isAuthenticated, isLoading: isAuthLoading, login, logout } = useAuth();
   const [prompt, setPrompt] = useState("");
   const [repoUrl, setRepoUrl] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -43,7 +46,7 @@ export default function Home() {
 
   // Dynamic GitHub Repos State
   const [ghUser, setGhUser] = useState("anmolsharma152");
-  const [customGhUser, setCustomGhUser] = useState("anmolsharma152");
+  const [customGhUser, setCustomGhUser] = useState("");
   const [isEditingUser, setIsEditingUser] = useState(false);
   const [repos, setRepos] = useState<GitHubRepo[]>([]);
   const [isLoadingRepos, setIsLoadingRepos] = useState(false);
@@ -55,12 +58,22 @@ export default function Home() {
   const router = useRouter();
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
 
-  // Dynamically fetch up to 100 repositories from GitHub REST API
+  // Sync ghUser with authenticated user when logged in
+  useEffect(() => {
+    if (user?.username) {
+      setGhUser(user.username);
+    }
+  }, [user]);
+
+  // Dynamically fetch repositories from backend /api/repos proxy
   useEffect(() => {
     let isMounted = true;
     setIsLoadingRepos(true);
 
-    fetch(`https://api.github.com/users/${ghUser}/repos?sort=updated&per_page=100`)
+    const queryUrl = `${apiBase}/api/repos${ghUser ? `?username_override=${encodeURIComponent(ghUser)}` : ""}`;
+    fetch(queryUrl, {
+      credentials: "include", // send session cookie if authenticated
+    })
       .then((res) => {
         if (!res.ok) throw new Error("Could not load GitHub repositories");
         return res.json();
@@ -80,7 +93,7 @@ export default function Home() {
     return () => {
       isMounted = false;
     };
-  }, [ghUser]);
+  }, [ghUser, apiBase, user]);
 
   const handleFetchUserRepos = (e: React.FormEvent) => {
     e.preventDefault();
@@ -101,6 +114,7 @@ export default function Home() {
       const res = await fetch(`${apiBase}/api/tasks`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include", // send session cookie
         body: JSON.stringify({
           prompt: prompt.trim(),
           repo_url: repoUrl.trim() || null,
@@ -170,25 +184,77 @@ export default function Home() {
                 <span className={`${styles.dot} ${styles.dotGreen}`} />
               </div>
               <span className={styles.terminalTitle}>agent-control-plane // prompt-input</span>
-              <button
-                type="button"
-                onClick={() => setIsSettingsOpen(true)}
-                style={{
-                  background: "rgba(99, 102, 241, 0.15)",
-                  border: "1px solid rgba(99, 102, 241, 0.35)",
-                  color: "#c7d2fe",
-                  fontSize: "0.72rem",
-                  padding: "2px 8px",
-                  borderRadius: "4px",
-                  cursor: "pointer",
-                  fontFamily: "var(--font-geist-mono), monospace",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "4px"
-                }}
-              >
-                ⚙️ Configure Models &amp; PAT
-              </button>
+              
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                {isAuthenticated && user ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px", background: "rgba(255, 255, 255, 0.05)", padding: "2px 8px", borderRadius: "6px", border: "1px solid rgba(255, 255, 255, 0.08)" }}>
+                    {user.avatar_url && (
+                      <img
+                        src={user.avatar_url}
+                        alt={user.username}
+                        style={{ width: "16px", height: "16px", borderRadius: "50%" }}
+                      />
+                    )}
+                    <span style={{ fontSize: "0.75rem", color: "#e4e4e7", fontWeight: 500 }}>
+                      @{user.username}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={logout}
+                      style={{
+                        background: "none",
+                        border: "none",
+                        color: "#a1a1aa",
+                        fontSize: "0.7rem",
+                        cursor: "pointer",
+                        padding: "0 2px"
+                      }}
+                      title="Sign Out"
+                    >
+                      (Sign Out)
+                    </button>
+                  </div>
+                ) : (
+                  <Link
+                    href="/login"
+                    style={{
+                      background: "rgba(99, 102, 241, 0.18)",
+                      border: "1px solid rgba(99, 102, 241, 0.4)",
+                      color: "#c7d2fe",
+                      fontSize: "0.72rem",
+                      padding: "3px 8px",
+                      borderRadius: "4px",
+                      textDecoration: "none",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "4px",
+                      fontWeight: 500
+                    }}
+                  >
+                    🐙 Sign In with GitHub
+                  </Link>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => setIsSettingsOpen(true)}
+                  style={{
+                    background: "rgba(99, 102, 241, 0.15)",
+                    border: "1px solid rgba(99, 102, 241, 0.35)",
+                    color: "#c7d2fe",
+                    fontSize: "0.72rem",
+                    padding: "3px 8px",
+                    borderRadius: "4px",
+                    cursor: "pointer",
+                    fontFamily: "var(--font-geist-mono), monospace",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "4px"
+                  }}
+                >
+                  ⚙️ Settings
+                </button>
+              </div>
             </div>
 
             {/* High-Contrast Prompt Input Container */}

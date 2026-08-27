@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import styles from "./Sidebar.module.css";
 import SettingsModal from "./SettingsModal";
+import { useAuth } from "../context/AuthContext";
 
 export interface TaskItem {
   id: number;
@@ -16,6 +17,7 @@ export interface TaskItem {
 }
 
 export default function Sidebar() {
+  const { user, isAuthenticated, logout } = useAuth();
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [collapsed, setCollapsed] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -26,7 +28,9 @@ export default function Sidebar() {
 
   const fetchTasks = async () => {
     try {
-      const res = await fetch(`${apiBase}/api/tasks?limit=25`);
+      const res = await fetch(`${apiBase}/api/tasks?limit=25`, {
+        credentials: "include",
+      });
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data)) {
@@ -42,13 +46,16 @@ export default function Sidebar() {
     fetchTasks();
     const interval = setInterval(fetchTasks, 4000);
     return () => clearInterval(interval);
-  }, [apiBase]);
+  }, [apiBase, user]);
 
   const handleStopTask = async (e: React.MouseEvent, id: number) => {
     e.stopPropagation();
     e.preventDefault();
     try {
-      const res = await fetch(`${apiBase}/api/tasks/${id}/cancel`, { method: "POST" });
+      const res = await fetch(`${apiBase}/api/tasks/${id}/cancel`, {
+        method: "POST",
+        credentials: "include",
+      });
       if (res.ok) {
         setTasks((prev) =>
           prev.map((t) => (t.id === id ? { ...t, status: "cancelled" } : t))
@@ -63,7 +70,10 @@ export default function Sidebar() {
     e.stopPropagation();
     e.preventDefault();
     try {
-      const res = await fetch(`${apiBase}/api/tasks/${id}`, { method: "DELETE" });
+      const res = await fetch(`${apiBase}/api/tasks/${id}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
       if (res.ok) {
         setTasks((prev) => prev.filter((t) => t.id !== id));
         if (pathname === `/tasks/${id}`) {
@@ -79,7 +89,10 @@ export default function Sidebar() {
     e.stopPropagation();
     e.preventDefault();
     try {
-      const res = await fetch(`${apiBase}/api/tasks/${id}/retry`, { method: "POST" });
+      const res = await fetch(`${apiBase}/api/tasks/${id}/retry`, {
+        method: "POST",
+        credentials: "include",
+      });
       if (res.ok) {
         setTasks((prev) =>
           prev.map((t) => (t.id === id ? { ...t, status: "pending" } : t))
@@ -94,7 +107,10 @@ export default function Sidebar() {
   const handleClearAll = async () => {
     if (!confirm("Are you sure you want to delete all tasks and execution logs?")) return;
     try {
-      const res = await fetch(`${apiBase}/api/tasks`, { method: "DELETE" });
+      const res = await fetch(`${apiBase}/api/tasks`, {
+        method: "DELETE",
+        credentials: "include",
+      });
       if (res.ok) {
         setTasks([]);
         router.push("/");
@@ -235,35 +251,97 @@ export default function Sidebar() {
         })}
       </div>
 
-      {/* Footer */}
+      {/* User Info & Footer */}
       {!collapsed && (
-        <div className={styles.sidebarFooter}>
-          <button
-            onClick={() => setIsSettingsOpen(true)}
-            style={{
-              background: "transparent",
-              border: "none",
-              color: "var(--text-muted)",
-              fontSize: "0.75rem",
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              gap: "5px",
-              padding: 0,
-              fontFamily: "inherit"
-            }}
-            title="Configure LLM Keys & GitHub PAT"
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="3"></circle>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-            </svg>
-            <span>Settings</span>
-          </button>
-          <Link href="/security" style={{ color: "var(--text-muted)", textDecoration: "none", fontSize: "0.75rem", display: "flex", alignItems: "center", gap: "4px" }}>
-            🛡️ Security
-          </Link>
-          <span style={{ fontSize: "0.7rem", color: "#818cf8", fontFamily: "monospace" }}>v2.0</span>
+        <div style={{ display: "flex", flexDirection: "column", gap: "8px", padding: "8px 12px 12px 12px", borderTop: "1px solid var(--border-color)" }}>
+          {isAuthenticated && user ? (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "rgba(255, 255, 255, 0.03)", padding: "6px 8px", borderRadius: "8px", border: "1px solid rgba(255, 255, 255, 0.06)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", overflow: "hidden" }}>
+                {user.avatar_url ? (
+                  <img
+                    src={user.avatar_url}
+                    alt={user.username}
+                    style={{ width: "22px", height: "22px", borderRadius: "50%", flexShrink: 0 }}
+                  />
+                ) : (
+                  <div style={{ width: "22px", height: "22px", borderRadius: "50%", background: "#4f46e5", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.7rem", color: "#fff" }}>
+                    {user.username.charAt(0).toUpperCase()}
+                  </div>
+                )}
+                <div style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
+                  <span style={{ fontSize: "0.75rem", color: "#f4f4f5", fontWeight: 600, whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" }}>
+                    {user.display_name || user.username}
+                  </span>
+                  <span style={{ fontSize: "0.68rem", color: "#a1a1aa" }}>
+                    @{user.username}
+                  </span>
+                </div>
+              </div>
+              <button
+                onClick={logout}
+                title="Sign out"
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "#71717a",
+                  cursor: "pointer",
+                  fontSize: "0.7rem",
+                  padding: "2px 4px"
+                }}
+              >
+                ✕
+              </button>
+            </div>
+          ) : (
+            <Link
+              href="/login"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "6px",
+                background: "rgba(255, 255, 255, 0.06)",
+                border: "1px solid rgba(255, 255, 255, 0.1)",
+                color: "#e4e4e7",
+                fontSize: "0.75rem",
+                padding: "6px 10px",
+                borderRadius: "6px",
+                textDecoration: "none",
+                fontWeight: 500
+              }}
+            >
+              🐙 Sign In with GitHub
+            </Link>
+          )}
+
+          <div className={styles.sidebarFooter}>
+            <button
+              onClick={() => setIsSettingsOpen(true)}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "var(--text-muted)",
+                fontSize: "0.75rem",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: "5px",
+                padding: 0,
+                fontFamily: "inherit"
+              }}
+              title="Configure LLM Keys & GitHub PAT"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+              </svg>
+              <span>Settings</span>
+            </button>
+            <Link href="/security" style={{ color: "var(--text-muted)", textDecoration: "none", fontSize: "0.75rem", display: "flex", alignItems: "center", gap: "4px" }}>
+              🛡️ Security
+            </Link>
+            <span style={{ fontSize: "0.7rem", color: "#818cf8", fontFamily: "monospace" }}>v2.0</span>
+          </div>
         </div>
       )}
 

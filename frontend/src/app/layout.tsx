@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import Sidebar from "../components/Sidebar";
 import JsonLd from "../components/JsonLd";
+import { AuthProvider } from "../context/AuthContext";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -92,10 +93,12 @@ export default function RootLayout({
         <JsonLd />
       </head>
       <body style={{ display: "flex", width: "100vw", height: "100vh", overflow: "hidden", margin: 0 }}>
-        <Sidebar />
-        <div style={{ flex: 1, height: "100vh", overflowY: "auto", display: "flex", flexDirection: "column", position: "relative" }}>
-          {children}
-        </div>
+        <AuthProvider>
+          <Sidebar />
+          <div style={{ flex: 1, height: "100vh", overflowY: "auto", display: "flex", flexDirection: "column", position: "relative" }}>
+            {children}
+          </div>
+        </AuthProvider>
       </body>
     </html>
   );
