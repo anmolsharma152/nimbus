@@ -45,7 +45,7 @@ export default function Home() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Dynamic GitHub Repos State
-  const [ghUser, setGhUser] = useState("anmolsharma152");
+  const [ghUser, setGhUser] = useState("");
   const [customGhUser, setCustomGhUser] = useState("");
   const [isEditingUser, setIsEditingUser] = useState(false);
   const [repos, setRepos] = useState<GitHubRepo[]>([]);
@@ -67,6 +67,11 @@ export default function Home() {
 
   // Dynamically fetch repositories from backend /api/repos proxy
   useEffect(() => {
+    if (!ghUser && !user) {
+      setRepos([]);
+      return;
+    }
+
     let isMounted = true;
     setIsLoadingRepos(true);
 
@@ -285,14 +290,18 @@ export default function Home() {
             <div className={styles.repoSection}>
               <div className={styles.repoHeaderRow}>
                 <span className={styles.repoLabel}>
-                  🐙 Select Repository (Fetched for {ghUser} • {repos.length} repos):
+                  {ghUser ? (
+                    `🐙 Select Repository (${isAuthenticated && user?.username === ghUser ? `Connected as @${ghUser}` : `Fetched for @${ghUser}`} • ${repos.length} repos):`
+                  ) : (
+                    "🐙 Target Repository (Public or Private):"
+                  )}
                 </span>
                 <button
                   type="button"
                   className={styles.userToggleBtn}
                   onClick={() => setIsEditingUser(!isEditingUser)}
                 >
-                  {isEditingUser ? "Close User Search" : "Change User / Org"}
+                  {isEditingUser ? "Close User Search" : (ghUser ? "Change User / Org" : "Browse by GitHub Username")}
                 </button>
               </div>
 
@@ -301,7 +310,7 @@ export default function Home() {
                   <input
                     type="text"
                     className={styles.userHandleInput}
-                    placeholder="GitHub username or org"
+                    placeholder="Enter GitHub username or org (e.g. anmolsharma152)"
                     value={customGhUser}
                     onChange={(e) => setCustomGhUser(e.target.value)}
                   />
@@ -310,27 +319,29 @@ export default function Home() {
                     className={styles.fetchBtn}
                     onClick={handleFetchUserRepos}
                   >
-                    Fetch All Repos
+                    Fetch Repos
                   </button>
                 </div>
               )}
 
               {/* Complete Repository Dropdown Select */}
-              <div style={{ marginBottom: "10px" }}>
-                <select
-                  className={styles.repoInput}
-                  style={{ cursor: "pointer", background: "#0b0c15", padding: "10px 12px", marginBottom: "8px" }}
-                  value={repoUrl}
-                  onChange={(e) => setRepoUrl(e.target.value)}
-                >
-                  <option value="">-- Choose from {repos.length} repositories of @{ghUser} --</option>
-                  {repos.map((repo) => (
-                    <option key={repo.id} value={repo.html_url}>
-                      {repo.name} {repo.language ? `[${repo.language}]` : ""} {repo.stargazers_count > 0 ? `(⭐${repo.stargazers_count})` : ""}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {repos.length > 0 && (
+                <div style={{ marginBottom: "10px" }}>
+                  <select
+                    className={styles.repoInput}
+                    style={{ cursor: "pointer", background: "#0b0c15", padding: "10px 12px", marginBottom: "8px" }}
+                    value={repoUrl}
+                    onChange={(e) => setRepoUrl(e.target.value)}
+                  >
+                    <option value="">-- Choose from {repos.length} repositories of @{ghUser} --</option>
+                    {repos.map((repo) => (
+                      <option key={repo.id} value={repo.html_url}>
+                        {repo.name} {repo.language ? `[${repo.language}]` : ""} {repo.stargazers_count > 0 ? `(⭐${repo.stargazers_count})` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {/* Quick 5 Recent Chips */}
               <div className={styles.repoChipsRow}>

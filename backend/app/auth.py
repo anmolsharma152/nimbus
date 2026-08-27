@@ -230,7 +230,7 @@ async def github_callback(
     })
 
     # 6. Redirect to frontend with HTTP-only cookie
-    redirect_target = f"{settings.FRONTEND_URL.rstrip('/')}/"
+    redirect_target = f"{settings.FRONTEND_URL.rstrip('/')}/onboarding" if not user.onboarding_completed else f"{settings.FRONTEND_URL.rstrip('/')}/"
     response = RedirectResponse(url=redirect_target, status_code=status.HTTP_302_FOUND)
     response.set_cookie(
         key=COOKIE_NAME,
