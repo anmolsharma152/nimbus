@@ -21,6 +21,7 @@ from .security import (
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 COOKIE_NAME = "nimbus_session"
+OAUTH_STATE_COOKIE = "nimbus_oauth_state"
 
 
 async def get_current_user(
@@ -37,13 +38,6 @@ async def get_current_user(
     auth_header = request.headers.get("Authorization")
     if not token and auth_header and auth_header.startswith("Bearer "):
         token = auth_header[7:].strip()
-
-    # Development / Testing bypass header for test suites
-    test_user_id = request.headers.get("X-Test-User-Id")
-    if test_user_id and (not settings.GITHUB_CLIENT_ID or test_user_id.isdigit()):
-        user = await db.get(User, int(test_user_id))
-        if user:
-            return user
 
     if not token:
         raise HTTPException(
@@ -108,11 +102,22 @@ async def github_login(request: Request):
         f"scope={scope}&"
         f"state={state}"
     )
-    return RedirectResponse(url=auth_url)
+    response = RedirectResponse(url=auth_url)
+    # Bind the OAuth round-trip to this browser to prevent login CSRF
+    response.set_cookie(
+        key=OAUTH_STATE_COOKIE,
+        value=state,
+        httponly=True,
+        max_age=600,
+        samesite="lax",
+        path="/api/auth/github"
+    )
+    return response
 
 
 @router.get("/github/callback")
 async def github_callback(
+    request: Request,
     code: str,
     state: Optional[str] = None,
     db: AsyncSession = Depends(get_db)
@@ -126,6 +131,10 @@ async def github_callback(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="GitHub OAuth credentials not configured."
         )
+
+    expected_state = request.cookies.get(OAUTH_STATE_COOKIE)
+    if not state or not expected_state or not secrets.compare_digest(state, expected_state):
+        raise HTTPException(status_code=400, detail="Invalid OAuth state. Please try signing in again.")
 
     # 1. Exchange code for access token
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -240,6 +249,7 @@ async def github_callback(
         samesite="lax",
         secure=False  # Set True in production over HTTPS
     )
+    response.delete_cookie(key=OAUTH_STATE_COOKIE, path="/api/auth/github")
     return response
 
 

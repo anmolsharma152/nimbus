@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Request, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Request, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,7 +18,7 @@ from .models import User, Task, TaskEvent, TaskStatus, EventType
 from .worker import enqueue_task
 from .auth import router as auth_router, get_current_user, get_optional_user, decode_access_token
 from .credentials import router as credentials_router, user_router
-from .security import decrypt_secret
+from .security import decrypt_secret, verify_internal_api_token
 from .ratelimit import check_task_submission_limits
 from .settings import settings
 
@@ -221,6 +221,8 @@ async def list_tasks(
     query = select(Task)
     if user:
         query = query.where(Task.user_id == user.id)
+    else:
+        query = query.where(Task.user_id.is_(None))
     query = query.order_by(Task.created_at.desc()).limit(limit)
     result = await db.execute(query)
     tasks = result.scalars().all()
@@ -423,16 +425,15 @@ async def clear_all_tasks(
     db: AsyncSession = Depends(get_db)
 ):
     from sqlalchemy import delete
-    if user:
-        # Delete only tasks belonging to this user
-        user_tasks = await db.execute(select(Task.id).where(Task.user_id == user.id))
-        task_ids = user_tasks.scalars().all()
-        if task_ids:
-            await db.execute(delete(TaskEvent).where(TaskEvent.task_id.in_(task_ids)))
-            await db.execute(delete(Task).where(Task.id.in_(task_ids)))
-    else:
-        await db.execute(delete(TaskEvent))
-        await db.execute(delete(Task))
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+
+    # Delete only tasks belonging to this user
+    user_tasks = await db.execute(select(Task.id).where(Task.user_id == user.id))
+    task_ids = user_tasks.scalars().all()
+    if task_ids:
+        await db.execute(delete(TaskEvent).where(TaskEvent.task_id.in_(task_ids)))
+        await db.execute(delete(Task).where(Task.id.in_(task_ids)))
     await db.commit()
     return {"ok": True, "message": "Tasks cleared successfully"}
 
@@ -511,7 +512,13 @@ async def websocket_endpoint(
 
 # API endpoint to post a new event (called by worker or redis listener)
 @app.post("/api/internal/tasks/{task_id}/events")
-async def post_event(task_id: int, payload: dict):
+async def post_event(
+    task_id: int,
+    payload: dict,
+    x_nimbus_internal_token: Optional[str] = Header(None)
+):
+    if not verify_internal_api_token(x_nimbus_internal_token):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid internal token")
     # Broadcast real-time to active listeners
     await manager.broadcast_event(task_id, payload)
     return {"ok": True}

@@ -100,7 +100,12 @@ async def test_internal_event_broadcast():
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
         payload = {"type": "log", "message": "Test event"}
-        response = await ac.post("/api/internal/tasks/101/events", json=payload)
+        from app.security import internal_api_token
+        response = await ac.post(
+            "/api/internal/tasks/101/events",
+            json=payload,
+            headers={"X-Nimbus-Internal-Token": internal_api_token()}
+        )
         assert response.status_code == 200
         assert response.json() == {"ok": True}
 

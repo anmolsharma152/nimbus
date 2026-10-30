@@ -15,6 +15,7 @@ import shlex
 from .db import async_session
 from .models import User, UserCredential, Task, TaskEvent, EventType, TaskStatus
 from .settings import settings
+from .security import decrypt_secret, internal_api_token
 from .workspace import UnifiedWorkspace
 from .github_client import create_draft_pr
 from .llm import LLMChatSession
@@ -47,7 +48,8 @@ async def log_event(db: AsyncSession, task_id: int, event_type: EventType, paylo
                     "type": ev_type_str,
                     "payload": json.dumps(payload_dict),
                     "timestamp": ts_str
-                }
+                },
+                headers={"X-Nimbus-Internal-Token": internal_api_token()}
             )
     except Exception as e:
         pass

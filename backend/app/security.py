@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import hmac
 import datetime
 from typing import Optional, Dict, Any
 import jwt
@@ -34,6 +35,18 @@ def decrypt_secret(ciphertext: Optional[str]) -> Optional[str]:
     except Exception:
         # If it was already plaintext or decryption failed, return original if non-empty
         return ciphertext
+
+
+def internal_api_token() -> str:
+    """Derives the shared worker -> API token from JWT_SECRET_KEY so both processes agree without extra config."""
+    return hmac.new(
+        settings.JWT_SECRET_KEY.encode("utf-8"), b"nimbus-internal-events", hashlib.sha256
+    ).hexdigest()
+
+
+def verify_internal_api_token(token: Optional[str]) -> bool:
+    """Constant-time check of a worker-supplied internal token."""
+    return bool(token) and hmac.compare_digest(token, internal_api_token())
 
 
 def create_access_token(data: Dict[str, Any], expires_delta: Optional[datetime.timedelta] = None) -> str:
