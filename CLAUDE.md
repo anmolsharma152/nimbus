@@ -9,7 +9,7 @@ Backend: Python 3.13, managed with **uv** (`backend/pyproject.toml`, `backend/uv
 cd backend
 uv sync                      # create .venv + install deps (incl. dev group: pytest, pytest-asyncio)
 uv sync --frozen --no-dev    # production install (what backend/Dockerfile does)
-docker build -f Dockerfile.workspace -t nimbus-workspace .   # sandbox image (currently NOT used by code; workspace.py defaults to ubuntu:22.04)
+docker build -f Dockerfile.workspace -t nimbus-workspace .   # required for Docker mode (WORKSPACE_IMAGE); agent runs as uid 10001
 ```
 Frontend: Node 20, **npm**, Next.js 16.3 / React 19.2 (read `frontend/AGENTS.md`: this Next version has breaking changes).
 ```bash
@@ -19,7 +19,9 @@ npm run build
 ```
 Config: copy `.env.example` → `.env` (settings load `.env` and `../.env`). Key vars: `DATABASE_URL`, `REDIS_URL`, `GEMINI_API_KEY` / `GROQ_API_KEY` / `OPENROUTER_API_KEY` (at least one needed to run tasks), `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (OAuth), `JWT_SECRET_KEY` (also derives the Fernet key for the credential vault, so rotating it breaks stored secrets), `FRONTEND_URL`, `API_INTERNAL_URL`, `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_WS_URL`.
 
-System prerequisites: PostgreSQL 16, Redis (optional: without it, `enqueue_task` runs the agent in-process), Docker daemon (optional: without it, `SubprocessWorkspace` runs commands **directly on the host**).
+System prerequisites: PostgreSQL 16, Redis (optional: without it, `enqueue_task` runs the agent in-process), Docker daemon (optional: without it, `SubprocessWorkspace` runs commands on the host, as a per-task UID with a scrubbed env when the worker is root, as on Render).
+
+Token rule: anything holding the GitHub token (clone, push) runs outside the agent's user and never reads the agent's `.git`; push replays the agent's patch onto a fresh clone (`app/workspace.py`, "Token-safe git operations").
 
 ## Run Commands
 

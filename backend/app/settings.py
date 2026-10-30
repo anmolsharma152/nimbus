@@ -78,6 +78,10 @@ class Settings(BaseSettings):
         default=20,
         description="Maximum turns allowed for an agent task."
     )
+    WORKSPACE_IMAGE: str = Field(
+        default="nimbus-workspace:latest",
+        description="Agent sandbox image built from backend/Dockerfile.workspace (Docker mode only)."
+    )
     TASK_TIMEOUT_SECONDS: float = Field(
         default=1800,
         description="Wall-clock limit for one agent task (30 min); the task is failed and its workspace removed."

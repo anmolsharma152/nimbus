@@ -21,6 +21,10 @@ def test_docker_workspace_setup_with_repo(mock_docker_env):
     mock_container = MagicMock()
     mock_container.short_id = "abc1234"
     mock_client.containers.run.return_value = mock_container
+    # Clone runs in a one-shot git helper container
+    mock_helper = mock_client.containers.create.return_value
+    mock_helper.wait.return_value = {"StatusCode": 0}
+    mock_helper.logs.return_value = b"Cloning...\n" + b"b" * 40
     mock_docker_env.return_value = mock_client
 
     ws = DockerWorkspace(task_id=10)

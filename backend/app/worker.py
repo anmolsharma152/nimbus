@@ -17,7 +17,7 @@ from .db import async_session
 from .models import User, UserCredential, Task, TaskEvent, EventType, TaskStatus
 from .settings import settings, secret_value
 from .security import decrypt_secret, internal_api_token
-from .workspace import UnifiedWorkspace, get_docker_client, reap_orphaned_containers
+from .workspace import UnifiedWorkspace, get_docker_client, reap_orphaned_containers, reap_orphaned_volumes
 from .github_client import create_draft_pr
 from .llm import LLMChatSession
 from .events import event_bus
@@ -287,7 +287,12 @@ async def _execute_agent_task(
                 # Push branch and open Draft PR if repo_url and token exist
                 if repo_url and final_github_token:
                     await log_event(db, task_id, EventType.LOG, {"message": f"Pushing branch '{branch_name}' to GitHub..."})
-                    push_code, push_out = await workspace.apush_branch(branch_name, repo_url, final_github_token)
+                    push_code, push_out = await workspace.apush_branch(
+                        branch_name, repo_url, final_github_token,
+                        message=f"Nimbus: {prompt[:60]}",
+                        author_name=git_user_name,
+                        author_email=git_user_email
+                    )
                     if push_code == 0:
                         author_tag = f"@{user.username}" if user else "Nimbus Agent"
                         pr_url = await create_draft_pr(
@@ -378,11 +383,12 @@ async def reap_orphaned_workspaces(ctx):
     client = get_docker_client()
     if client is None:
         return 0
-    removed = await asyncio.to_thread(
-        reap_orphaned_containers, client, settings.TASK_TIMEOUT_SECONDS + 600
-    )
+    max_age = settings.TASK_TIMEOUT_SECONDS + 600
+    removed = await asyncio.to_thread(reap_orphaned_containers, client, max_age)
+    # Volumes after containers: a volume still attached to a container can't be removed
+    removed += await asyncio.to_thread(reap_orphaned_volumes, client, max_age)
     if removed:
-        print(f"Reaped {removed} orphaned workspace container(s).")
+        print(f"Reaped {removed} orphaned workspace container(s)/volume(s).")
     return removed
 
 
