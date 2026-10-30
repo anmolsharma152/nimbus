@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any
 
 from .db import get_db
 from .models import User
-from .settings import settings
+from .settings import settings, secret_value
 from .security import (
     create_access_token,
     decode_access_token,
@@ -143,7 +143,7 @@ async def github_callback(
             headers={"Accept": "application/json"},
             data={
                 "client_id": settings.GITHUB_CLIENT_ID,
-                "client_secret": settings.GITHUB_CLIENT_SECRET,
+                "client_secret": secret_value(settings.GITHUB_CLIENT_SECRET),
                 "code": code,
             }
         )

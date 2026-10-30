@@ -15,7 +15,7 @@ import shlex
 
 from .db import async_session
 from .models import User, UserCredential, Task, TaskEvent, EventType, TaskStatus
-from .settings import settings
+from .settings import settings, secret_value
 from .security import decrypt_secret, internal_api_token
 from .workspace import UnifiedWorkspace, get_docker_client, reap_orphaned_containers
 from .github_client import create_draft_pr
@@ -121,7 +121,7 @@ async def _execute_agent_task(
                     elif c.provider == "openrouter" and decrypted:
                         user_openrouter_key = decrypted
 
-        final_github_token = user_github_token or settings.GITHUB_TOKEN
+        final_github_token = user_github_token or secret_value(settings.GITHUB_TOKEN)
         has_any_llm_key = bool(
             user_gemini_key or user_groq_key or user_openrouter_key or
             settings.GEMINI_API_KEY or settings.GROQ_API_KEY or settings.OPENROUTER_API_KEY
@@ -351,7 +351,7 @@ def normalize_redis_url(url: Optional[str]) -> str:
 
 
 # Setup arq settings with sanitized Redis URL
-redis_settings = RedisSettings.from_dsn(normalize_redis_url(settings.REDIS_URL))
+redis_settings = RedisSettings.from_dsn(normalize_redis_url(secret_value(settings.REDIS_URL)))
 
 async def enqueue_task(
     task_id: int,

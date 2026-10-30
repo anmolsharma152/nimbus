@@ -1,3 +1,8 @@
+import os
+
+# Must be set before any `app` import: keeps the developer's real .env out of the test run
+os.environ["NIMBUS_IGNORE_DOTENV"] = "1"
+
 import pytest
 
 from app import workspace

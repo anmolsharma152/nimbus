@@ -7,7 +7,7 @@ from alembic import context
 
 from app.db import Base, normalize_async_db_url
 from app.models import Task, TaskEvent
-from app.settings import settings
+from app.settings import settings, secret_value
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -22,7 +22,7 @@ if config.config_file_name is not None:
 # for 'autogenerate' support
 target_metadata = Base.metadata
 
-alembic_db_url = normalize_async_db_url(settings.DATABASE_URL)
+alembic_db_url = normalize_async_db_url(secret_value(settings.DATABASE_URL))
 config.set_main_option("sqlalchemy.url", alembic_db_url)
 
 def run_migrations_offline() -> None:

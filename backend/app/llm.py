@@ -12,7 +12,7 @@ import httpx
 from google import genai
 from google.genai import types
 
-from .settings import settings
+from .settings import settings, secret_value
 
 
 class LLMChatSession:
@@ -30,9 +30,9 @@ class LLMChatSession:
         self.system_instruction = system_instruction
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.gemini_api_key = gemini_api_key or settings.GEMINI_API_KEY
-        self.groq_api_key = groq_api_key or settings.GROQ_API_KEY
-        self.openrouter_api_key = openrouter_api_key or settings.OPENROUTER_API_KEY
+        self.gemini_api_key = gemini_api_key or secret_value(settings.GEMINI_API_KEY)
+        self.groq_api_key = groq_api_key or secret_value(settings.GROQ_API_KEY)
+        self.openrouter_api_key = openrouter_api_key or secret_value(settings.OPENROUTER_API_KEY)
 
         # Unified message history for OpenAI-compatible endpoints: [{"role": "...", "content": "..."}]
         self.messages: List[Dict[str, str]] = [

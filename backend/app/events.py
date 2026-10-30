@@ -4,7 +4,7 @@ import json
 import asyncio
 from typing import Optional, Dict, Any, AsyncGenerator
 import redis.asyncio as redis
-from .settings import settings
+from .settings import settings, secret_value
 
 
 def normalize_redis_url(url: Optional[str]) -> str:
@@ -32,7 +32,7 @@ class RedisEventBus:
 
     def _get_redis(self) -> redis.Redis:
         if self._redis is None:
-            clean_url = normalize_redis_url(settings.REDIS_URL)
+            clean_url = normalize_redis_url(secret_value(settings.REDIS_URL))
             self._redis = redis.from_url(
                 clean_url,
                 encoding="utf-8",

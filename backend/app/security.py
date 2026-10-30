@@ -8,12 +8,16 @@ from typing import Optional, Dict, Any
 import jwt
 from cryptography.fernet import Fernet
 
-from .settings import settings
+from .settings import settings, secret_value
+
+
+def _jwt_secret() -> str:
+    return secret_value(settings.JWT_SECRET_KEY)
 
 
 def _get_fernet_key() -> bytes:
     """Derives a deterministic 32-byte url-safe base64 Fernet key from the JWT_SECRET_KEY."""
-    digest = hashlib.sha256(settings.JWT_SECRET_KEY.encode("utf-8")).digest()
+    digest = hashlib.sha256(_jwt_secret().encode("utf-8")).digest()
     return base64.urlsafe_b64encode(digest)
 
 
@@ -40,7 +44,7 @@ def decrypt_secret(ciphertext: Optional[str]) -> Optional[str]:
 def internal_api_token() -> str:
     """Derives the shared worker -> API token from JWT_SECRET_KEY so both processes agree without extra config."""
     return hmac.new(
-        settings.JWT_SECRET_KEY.encode("utf-8"), b"nimbus-internal-events", hashlib.sha256
+        _jwt_secret().encode("utf-8"), b"nimbus-internal-events", hashlib.sha256
     ).hexdigest()
 
 
@@ -58,7 +62,7 @@ def create_access_token(data: Dict[str, Any], expires_delta: Optional[datetime.t
     else:
         expire = now + datetime.timedelta(minutes=settings.JWT_EXPIRE_MINUTES)
     to_encode.update({"exp": expire, "iat": now})
-    return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+    return jwt.encode(to_encode, _jwt_secret(), algorithm=settings.JWT_ALGORITHM)
 
 
 def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
@@ -66,7 +70,7 @@ def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
     try:
         payload = jwt.decode(
             token,
-            settings.JWT_SECRET_KEY,
+            _jwt_secret(),
             algorithms=[settings.JWT_ALGORITHM]
         )
         return payload
