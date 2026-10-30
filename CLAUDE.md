@@ -30,7 +30,7 @@ cd backend
 uv run alembic upgrade head
 uv run uvicorn app.main:app --port 8000 --reload
 uv run arq app.worker.WorkerSettings
-uv run python evals/eval_runner.py        # synthetic + live-workspace eval scorecard
+uv run python evals/eval_runner.py        # real agent loop on fixture repos (calls your LLM keys)
 
 cd frontend && npm run dev                # http://localhost:3000
 ```

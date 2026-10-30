@@ -332,12 +332,15 @@ tests/test_workspace.py .....                                            [100%]
 ============================== 46 passed in 7.43s ==============================
 ```
 
-### Running Autonomous Agent Evaluation Benchmark
+### Running the Agent Evaluation
 
 ```bash
 cd backend
-uv run python evals/eval_runner.py
+uv run python evals/eval_runner.py                    # all fixture cases
+uv run python evals/eval_runner.py --case slugify --json scorecard.json
 ```
+
+Runs the real agent loop against small fixture repos and scores each run with hidden tests. It uses the LLM keys from `.env`, so it consumes provider quota. `tests/test_evals.py` checks the harness with a scripted LLM.
 
 ---
 

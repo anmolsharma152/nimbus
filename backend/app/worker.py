@@ -22,6 +22,7 @@ from .security import decrypt_secret, internal_api_token
 from .workspace import UnifiedWorkspace, get_docker_client, reap_orphaned_containers, reap_orphaned_volumes
 from .github_client import create_draft_pr
 from .llm import LLMChatSession
+from .agent import SYSTEM_INSTRUCTION, initial_prompt, run_agent_commands
 from .events import event_bus
 from .logging_config import configure_logging, task_id_var
 
@@ -216,25 +217,8 @@ async def _execute_agent_task(
                 {"message": f"Docker workspace ready in /workspace/repo (Author: {git_user_name} <{git_user_email}>). Starting 3-tier LLM reasoning loop..."}
             )
 
-            system_instruction = (
-                "You are Nimbus, an autonomous cloud software engineer. You operate inside an isolated Linux workspace "
-                "with git, python3, and standard tools pre-installed. The current working directory is /workspace/repo.\n\n"
-                "Your objective is to inspect the codebase, make real code modifications on disk, run tests to verify your fix, "
-                "and ensure the repository is left in a clean, working state with passing assertions.\n\n"
-                "To execute a bash command (e.g. to inspect files, write code via `cat << 'EOF' > file.py`, run tests, or view git diff), "
-                "output a JSON block strictly formatted as:\n"
-                "```json\n{\n  \"command\": \"<your bash command here>\",\n  \"screenshot\": \"<optional relative path to generated .png file>\",\n  \"caption\": \"<optional screenshot caption>\"\n}\n```\n\n"
-                "CRITICAL Rules:\n"
-                "1. You MUST execute bash commands to write your actual code and test files to disk (e.g. using `cat << 'EOF' > ...` or python). Do NOT just describe code in text.\n"
-                "2. Directly inspect relevant source files with `find`, `grep`, or `cat`.\n"
-                "3. Do NOT run heavy full-stack package installations (`pip install -r requirements.txt`). Instead, write focused tests using standard library unittest, pytest, or mocks (`unittest.mock`).\n"
-                "4. Visual Verification: If your task touches UI, HTML, CSS, or rendering, you may generate image snapshots (e.g. via python Pillow/matplotlib/playwright) and include `\"screenshot\": \"preview.png\"` in your JSON.\n"
-                "5. Run `git diff` to verify that your changes are written to disk.\n"
-                "6. ONLY after your code changes are written and verified with git diff, summarize your completed work in markdown without emitting further JSON command blocks."
-            )
-
             llm_session = LLMChatSession(
-                system_instruction=system_instruction,
+                system_instruction=SYSTEM_INSTRUCTION,
                 temperature=0.1,
                 gemini_api_key=user_gemini_key,
                 groq_api_key=user_groq_key,
@@ -242,82 +226,26 @@ async def _execute_agent_task(
             )
             stats["_llm"] = llm_session
 
-            # Agent Loop
-            current_prompt = (
-                f"Task Goal:\n{prompt}\n\n"
-                f"Repository: {repo_url or 'Local workspace repository'}\n"
-                f"Active Branch: {branch_name}\n"
-                "Begin by listing files or inspecting the project structure."
-            )
-            max_iterations = settings.MAX_AGENT_ITERATIONS
-            STALL_TIMEOUT_SECONDS = 90  # if no LLM tier responds, fail cleanly instead of eating the task time limit
+            async def emit(event_type: EventType, payload: dict):
+                await log_event(db, task_id, event_type, payload)
 
-            for iteration in range(max_iterations):
-                stats["iterations"] = iteration + 1
-                # Check for cancellation before turn
+            async def cancelled_by_user() -> bool:
                 await db.refresh(task)
-                if task.status == TaskStatus.CANCELLED:
-                    stats["status"] = "cancelled"
-                    await log_event(db, task_id, EventType.LOG, {"message": "Task execution cancelled by user."})
-                    return
+                return task.status == TaskStatus.CANCELLED
 
-                async def handle_fallback_notice(msg: str):
-                    await log_event(db, task_id, EventType.LOG, {"message": msg})
-
-                try:
-                    text = await asyncio.wait_for(
-                        llm_session.send_message(current_prompt, on_fallback=handle_fallback_notice),
-                        timeout=STALL_TIMEOUT_SECONDS
-                    )
-                except asyncio.TimeoutError:
-                    timeout_msg = (
-                        f"Agent timed out: No LLM response received within {STALL_TIMEOUT_SECONDS} seconds. "
-                        "All providers may be overloaded or rate-limited. Please retry the task later."
-                    )
-                    await log_event(db, task_id, EventType.LOG, {"message": timeout_msg})
-                    raise RuntimeError(timeout_msg)
-
-                # Check if LLM emitted a command block
-                if "```json" in text and "\"command\":" in text:
-                    try:
-                        json_str = text.split("```json")[1].split("```")[0].strip()
-                        cmd_obj = json.loads(json_str)
-                        command = cmd_obj.get("command", "")
-                        screenshot_file = cmd_obj.get("screenshot")
-                        screenshot_caption = cmd_obj.get("caption") or f"Visual snapshot of {screenshot_file}"
-                        
-                        await log_event(db, task_id, EventType.COMMAND, {"command": command})
-                        
-                        # Execute in workspace asynchronously
-                        stats["commands"] = stats.get("commands", 0) + 1
-                        exit_code, output = await workspace.aexecute_command(command)
-                        
-                        # Capture visual screenshot artifact if requested
-                        if screenshot_file:
-                            b64_img = await workspace.aget_file_base64(screenshot_file)
-                            if b64_img:
-                                await log_event(db, task_id, EventType.RESULT, {
-                                    "screenshot": f"data:image/png;base64,{b64_img}",
-                                    "filename": screenshot_file.split("/")[-1],
-                                    "caption": screenshot_caption
-                                })
-                        
-                        # Limit output length to prevent context explosion
-                        if len(output) > 10000:
-                            output = output[:10000] + "\n...[output truncated for length]"
-                            
-                        result_str = f"[Exit code: {exit_code}]\n{output}"
-                        await log_event(db, task_id, EventType.RESULT, {"output": result_str})
-                        
-                        current_prompt = f"Command output:\n{result_str}"
-                    except Exception as e:
-                        error_msg = f"Failed to parse or execute command: {e}"
-                        await log_event(db, task_id, EventType.RESULT, {"output": error_msg})
-                        current_prompt = f"Error: {error_msg}. Please check your JSON format and try again."
-                else:
-                    # Final summary output
-                    await log_event(db, task_id, EventType.LOG, {"message": f"Agent completed: {text}"})
-                    break
+            outcome = await run_agent_commands(
+                llm_session,
+                workspace,
+                initial_prompt(prompt, repo_url, branch_name),
+                emit,
+                max_iterations=settings.MAX_AGENT_ITERATIONS,
+                stats=stats,
+                should_stop=cancelled_by_user,
+            )
+            if outcome == "cancelled":
+                stats["status"] = "cancelled"
+                await log_event(db, task_id, EventType.LOG, {"message": "Task execution cancelled by user."})
+                return
             
             # Post-execution: capture diff and create PR / commit
             diff_text = await workspace.aget_diff()

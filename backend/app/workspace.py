@@ -733,8 +733,8 @@ def create_workspace(task_id: int):
 class UnifiedWorkspace:
     """Unified asynchronous workspace interface wrapping either Docker or Subprocess."""
 
-    def __init__(self, task_id: int):
-        self.impl = create_workspace(task_id)
+    def __init__(self, task_id: int, impl=None):
+        self.impl = impl or create_workspace(task_id)
 
     async def asetup(
         self,

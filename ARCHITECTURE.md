@@ -221,10 +221,10 @@ Nimbus is deployed across a multi-service modern cloud infrastructure:
 
 ## 8. Evaluation Benchmark & Verification Architecture
 
-Nimbus incorporates an autonomous software engineering benchmark suite (`backend/evals/eval_runner.py`):
-1. **Synthetic Multi-Turn Benchmark**: Evaluates code inspection, edge-case fixing, test assertions, and format self-correction.
-2. **Live Filesystem Workspace Benchmark**: Provisions real disk repositories, injects buggy code, executes real unittest runners, verifies disk fixes, and validates git diff outputs.
-3. **Continuous Regression Testing**: 46 comprehensive Pytest unit and integration tests covering API routes, authentication, credential vaults, LLM failovers, event streaming, and workspace sandboxing.
+`backend/evals/eval_runner.py` runs the same command loop as the worker (`app/agent.py`) on small fixture repos (factorial edge case, slugify implementation, calculator bug):
+1. Each case seeds and commits a fixture repo in a real workspace (Docker or subprocess), then gives the agent the task prompt using the configured LLM tiers.
+2. After the agent stops, hidden tests that the agent never saw are written (overwriting any same-named files) and run. A case passes when those tests pass and the agent produced a diff.
+3. The scorecard reports pass rate, turns, commands, duration, and LLM calls per tier. `tests/test_evals.py` drives the harness with a scripted LLM, so CI exercises it without API calls.
 
 ---
 
