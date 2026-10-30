@@ -11,9 +11,11 @@ import asyncio
 import datetime
 import traceback
 import httpx
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 
-from .db import get_db, engine, Base
+from .db import get_db, engine, Base, async_session
+from .events import event_bus
 from .models import User, Task, TaskEvent, TaskStatus, EventType
 from .worker import enqueue_task
 from .auth import router as auth_router, get_current_user, get_optional_user, decode_access_token
@@ -42,7 +44,17 @@ async def lifespan(app: FastAPI):
                     print(f"Column migration check note: {alter_err}")
     except Exception as e:
         print(f"Database schema initialization notice: {e}")
-    yield
+
+    relay_task = asyncio.create_task(relay_redis_events())
+    try:
+        yield
+    finally:
+        relay_task.cancel()
+        try:
+            await relay_task
+        except asyncio.CancelledError:
+            pass
+        await event_bus.close()
 
 app = FastAPI(title="Nimbus Control Plane", lifespan=lifespan)
 
@@ -280,17 +292,9 @@ async def get_task_events(
     if task.user_id is not None and (user is None or task.user_id != user.id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
 
-    result = await db.execute(select(TaskEvent).where(TaskEvent.task_id == task_id).order_by(TaskEvent.created_at))
+    result = await db.execute(select(TaskEvent).where(TaskEvent.task_id == task_id).order_by(TaskEvent.id))
     events = result.scalars().all()
-    return [
-        {
-            "id": ev.id,
-            "type": str(ev.event_type.value).lower() if hasattr(ev.event_type, "value") else str(ev.event_type).lower(),
-            "payload": ev.payload,
-            "timestamp": ev.created_at.isoformat() + "Z"
-        }
-        for ev in events
-    ]
+    return [_event_message(ev) for ev in events]
 
 @app.get("/api/tasks/{task_id}/screenshots")
 async def get_task_screenshots(
@@ -437,16 +441,22 @@ async def clear_all_tasks(
     await db.commit()
     return {"ok": True, "message": "Tasks cleared successfully"}
 
-# Simple connection manager with leak prevention
 class ConnectionManager:
-    def __init__(self):
-        self.active_connections: dict[int, list[WebSocket]] = {}
+    """Per-process registry of live task streams.
 
-    async def connect(self, websocket: WebSocket, task_id: int):
-        await websocket.accept()
-        if task_id not in self.active_connections:
-            self.active_connections[task_id] = []
-        self.active_connections[task_id].append(websocket)
+    Events can reach a process twice (Redis pub/sub and the worker's HTTP fallback), so persisted
+    events are de-duplicated by id. A socket that errors or stalls is dropped instead of blocking
+    delivery to everyone else.
+    """
+
+    def __init__(self, send_timeout: float = 5.0, recent_ids_per_task: int = 1000):
+        self.active_connections: dict[int, list[WebSocket]] = {}
+        self.send_timeout = send_timeout
+        self.recent_ids_per_task = recent_ids_per_task
+        self._recent_ids: dict[int, "OrderedDict[int, None]"] = {}
+
+    def register(self, websocket: WebSocket, task_id: int):
+        self.active_connections.setdefault(task_id, []).append(websocket)
 
     def disconnect(self, websocket: WebSocket, task_id: int):
         if task_id in self.active_connections:
@@ -454,60 +464,106 @@ class ConnectionManager:
                 self.active_connections[task_id].remove(websocket)
             if not self.active_connections[task_id]:
                 del self.active_connections[task_id]
+                self._recent_ids.pop(task_id, None)
+
+    def _is_duplicate(self, task_id: int, event_id: Optional[int]) -> bool:
+        if event_id is None:
+            return False
+        seen = self._recent_ids.setdefault(task_id, OrderedDict())
+        if event_id in seen:
+            return True
+        seen[event_id] = None
+        if len(seen) > self.recent_ids_per_task:
+            seen.popitem(last=False)
+        return False
 
     async def broadcast_event(self, task_id: int, event_data: dict):
-        if task_id in self.active_connections:
-            for connection in self.active_connections[task_id]:
-                try:
-                    await connection.send_text(json.dumps(event_data))
-                except Exception:
-                    pass
+        if task_id not in self.active_connections:
+            return
+        if self._is_duplicate(task_id, event_data.get("id")):
+            return
+        message = json.dumps(event_data)
+        for connection in list(self.active_connections.get(task_id, [])):
+            try:
+                await asyncio.wait_for(connection.send_text(message), timeout=self.send_timeout)
+            except Exception:
+                self.disconnect(connection, task_id)
 
 manager = ConnectionManager()
+
+
+def _event_message(ev: TaskEvent) -> dict:
+    return {
+        "id": ev.id,
+        "type": str(ev.event_type.value).lower() if hasattr(ev.event_type, "value") else str(ev.event_type).lower(),
+        "payload": ev.payload,
+        "timestamp": ev.created_at.isoformat() + "Z"
+    }
+
+
+async def relay_redis_events(sleep=asyncio.sleep):
+    """Forwards worker events from Redis pub/sub to this process's sockets, reconnecting with backoff."""
+    backoff = 1
+    while True:
+        try:
+            async for data in event_bus.subscribe_all():
+                backoff = 1
+                task_id = data.get("task_id")
+                if task_id is None:
+                    continue
+                await manager.broadcast_event(
+                    int(task_id),
+                    {key: data[key] for key in ("id", "type", "payload", "timestamp") if key in data}
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[Redis relay] Subscription lost ({e}); retrying in {backoff}s")
+            await sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
 
 @app.websocket("/ws/tasks/{task_id}")
 async def websocket_endpoint(
     websocket: WebSocket,
     task_id: int,
     token: Optional[str] = Query(None),
-    db: AsyncSession = Depends(get_db)
+    after: Optional[int] = Query(None, description="Resume cursor: only replay events with a larger id")
 ):
-    # Verify task existence and authorization
-    result = await db.execute(select(Task).where(Task.id == task_id))
-    task = result.scalar_one_or_none()
+    # Accept before rejecting: a pre-accept close reaches browsers as 1006, hiding the 1008 auth code
+    await websocket.accept()
+
+    # Short-lived session: a long-lived stream must not pin a pooled DB connection
+    async with async_session() as db:
+        task = await db.get(Task, task_id)
     if not task:
         await websocket.close(code=1008, reason="Task not found")
         return
 
-    # If task belongs to a registered user, verify session token
     if task.user_id is not None:
         auth_token = token or websocket.cookies.get("nimbus_session")
-        if not auth_token:
-            await websocket.close(code=1008, reason="Authentication required for this task")
-            return
-        payload = decode_access_token(auth_token)
+        payload = decode_access_token(auth_token) if auth_token else None
         if not payload or payload.get("sub") != str(task.user_id):
             await websocket.close(code=1008, reason="Unauthorized access to task stream")
             return
 
-    await manager.connect(websocket, task_id)
-    
-    # Send historical events first
-    result = await db.execute(select(TaskEvent).where(TaskEvent.task_id == task_id).order_by(TaskEvent.created_at))
-    events = result.scalars().all()
-    for ev in events:
-        ev_type = str(ev.event_type.value).lower() if hasattr(ev.event_type, "value") else str(ev.event_type).lower()
-        await websocket.send_text(json.dumps({
-            "type": ev_type,
-            "payload": ev.payload,
-            "timestamp": ev.created_at.isoformat() + "Z"
-        }))
-
+    # Register before reading history so nothing published in between is missed (clients de-dupe by id)
+    manager.register(websocket, task_id)
     try:
+        async with async_session() as db:
+            query = select(TaskEvent).where(TaskEvent.task_id == task_id)
+            if after is not None:
+                query = query.where(TaskEvent.id > after)
+            result = await db.execute(query.order_by(TaskEvent.id))
+            events = result.scalars().all()
+        for ev in events:
+            await websocket.send_text(json.dumps(_event_message(ev)))
+
         while True:
-            data = await websocket.receive_text()
-            # Keep connection open
+            await websocket.receive_text()
     except WebSocketDisconnect:
+        pass
+    finally:
         manager.disconnect(websocket, task_id)
 
 # API endpoint to post a new event (called by worker or redis listener)

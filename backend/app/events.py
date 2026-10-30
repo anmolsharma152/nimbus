@@ -42,12 +42,20 @@ class RedisEventBus:
             )
         return self._redis
 
-    async def publish_event(self, task_id: int, event_type: str, payload_dict: Dict[str, Any], timestamp: Optional[str] = None):
+    async def publish_event(
+        self,
+        task_id: int,
+        event_type: str,
+        payload_dict: Dict[str, Any],
+        timestamp: Optional[str] = None,
+        event_id: Optional[int] = None
+    ):
         """
         Publishes a flight event to Redis Pub/Sub channel and appends to the task's Redis Stream.
         """
         event_data = {
             "task_id": task_id,
+            "id": event_id,
             "type": event_type,
             "payload": json.dumps(payload_dict) if isinstance(payload_dict, dict) else str(payload_dict),
             "timestamp": timestamp or ""
@@ -87,6 +95,29 @@ class RedisEventBus:
         finally:
             await pubsub.unsubscribe(channel_name)
             await pubsub.close()
+
+    async def subscribe_all(self) -> AsyncGenerator[Dict[str, Any], None]:
+        """Yields events for every task (one pattern subscription per API process).
+
+        Polls with an explicit timeout instead of `listen()`, so quiet periods don't trip
+        socket_timeout; a dropped connection raises and the caller reconnects.
+        """
+        pubsub = self._get_redis().pubsub()
+        await pubsub.psubscribe("nimbus:events:task:*")
+        try:
+            while True:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if not message or message.get("type") != "pmessage":
+                    continue
+                try:
+                    yield json.loads(message["data"])
+                except (TypeError, ValueError):
+                    continue
+        finally:
+            try:
+                await pubsub.punsubscribe()
+            finally:
+                await pubsub.aclose()
 
     async def close(self):
         """Gracefully closes Redis connection pool."""

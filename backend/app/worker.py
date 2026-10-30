@@ -35,7 +35,7 @@ async def log_event(db: AsyncSession, task_id: int, event_type: EventType, paylo
 
     # 1. Publish to Redis Event Bus (real-time fanout to all API replicas)
     try:
-        await event_bus.publish_event(task_id, ev_type_str, payload_dict, ts_str)
+        await event_bus.publish_event(task_id, ev_type_str, payload_dict, ts_str, event_id=event.id)
     except Exception as e:
         print(f"Failed to publish to Redis Event Bus: {e}")
 
@@ -46,6 +46,7 @@ async def log_event(db: AsyncSession, task_id: int, event_type: EventType, paylo
             await client.post(
                 f"{api_base.rstrip('/')}/api/internal/tasks/{task_id}/events",
                 json={
+                    "id": event.id,
                     "type": ev_type_str,
                     "payload": json.dumps(payload_dict),
                     "timestamp": ts_str
