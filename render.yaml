@@ -19,6 +19,8 @@ services:
         sync: false
       - key: GEMINI_MODEL
         value: gemini-3.6-flash
+      - key: LOG_FORMAT
+        value: json
 
 databases:
   # 2. PostgreSQL Database

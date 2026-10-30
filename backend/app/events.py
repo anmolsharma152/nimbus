@@ -2,9 +2,12 @@
 
 import json
 import asyncio
+import logging
 from typing import Optional, Dict, Any, AsyncGenerator
 import redis.asyncio as redis
 from .settings import settings, secret_value
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_redis_url(url: Optional[str]) -> str:
@@ -73,7 +76,7 @@ class RedisEventBus:
             # 2. Append to persistent Redis stream (capped to last 500 events)
             await r.xadd(stream_name, {"event": json_str}, maxlen=500, approximate=True)
         except Exception as e:
-            print(f"[RedisEventBus] Notice: Failed to publish to Redis ({e})")
+            logger.warning("Failed to publish task %s event to Redis: %s", task_id, e)
 
     async def subscribe_task(self, task_id: int) -> AsyncGenerator[Dict[str, Any], None]:
         """

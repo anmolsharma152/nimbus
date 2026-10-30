@@ -9,7 +9,8 @@ from typing import Optional, List, Dict, Any
 import json
 import asyncio
 import datetime
-import traceback
+import logging
+import time
 import httpx
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -23,6 +24,12 @@ from .credentials import router as credentials_router, user_router
 from .security import decrypt_secret, verify_internal_api_token
 from .ratelimit import check_task_submission_limits
 from .settings import settings
+from .logging_config import configure_logging, new_request_id, request_id_var
+
+configure_logging()
+logger = logging.getLogger(__name__)
+
+HEALTH_PATHS = {"/", "/healthz", "/api/health"}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -41,9 +48,9 @@ async def lifespan(app: FastAPI):
                     await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS pr_url VARCHAR;"))
                     await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS patch_diff TEXT;"))
                 except Exception as alter_err:
-                    print(f"Column migration check note: {alter_err}")
+                    logger.warning("Column migration check failed: %s", alter_err)
     except Exception as e:
-        print(f"Database schema initialization notice: {e}")
+        logger.warning("Database schema initialization failed: %s", e)
 
     relay_task = asyncio.create_task(relay_redis_events())
     try:
@@ -76,13 +83,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    """Tags every log line of a request with its id and logs one access line with timing."""
+    request_id = new_request_id(request.headers.get("X-Request-ID"))
+    request.state.request_id = request_id
+    token = request_id_var.set(request_id)
+    start = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        logger.log(
+            logging.DEBUG if request.url.path in HEALTH_PATHS else logging.INFO,
+            "%s %s -> %s", request.method, request.url.path, status_code,
+            extra={
+                "event": "http_request",
+                "method": request.method,
+                "path": request.url.path,
+                "status": status_code,
+                "duration_ms": round((time.perf_counter() - start) * 1000, 1),
+            }
+        )
+        request_id_var.reset(token)
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    err_trace = traceback.format_exc()
-    print(f"[Unhandled Server Error on {request.url.path}]: {err_trace}")
+    # Full details go to the logs only; clients get an id to quote, never a traceback
+    request_id = getattr(request.state, "request_id", None) or new_request_id()
+    logger.error(
+        "Unhandled error on %s %s", request.method, request.url.path,
+        exc_info=exc, extra={"event": "unhandled_error", "request_id": request_id}
+    )
     return JSONResponse(
         status_code=500,
-        content={"detail": str(exc), "trace": err_trace[:500]}
+        content={"detail": "Internal server error", "request_id": request_id},
+        headers={"X-Request-ID": request_id}
     )
 
 @app.api_route("/", methods=["GET", "HEAD"])
@@ -176,7 +215,7 @@ async def list_user_repositories(
                     ]
             return []
     except Exception as e:
-        print(f"Failed to fetch repositories from GitHub: {e}")
+        logger.warning("Failed to fetch repositories from GitHub: %s", e)
         return []
 
 @app.post("/api/tasks", response_model=TaskCreateResponse)
@@ -208,7 +247,7 @@ async def create_task(
         try:
             await enqueue_task(task_id, req.prompt, req.repo_url, req.git_branch)
         except Exception as queue_err:
-            print(f"Failed to enqueue task {task_id} into Redis: {queue_err}")
+            logger.error("Failed to enqueue task %s: %s", task_id, queue_err)
         
         status_val = str(task.status.value).lower() if hasattr(task.status, "value") else str(task.status or "pending").lower()
         return TaskCreateResponse(
@@ -221,7 +260,7 @@ async def create_task(
     except Exception as e:
         await db.rollback()
         err_msg = f"Task creation failed in DB: {e}"
-        print(f"Error in create_task: {traceback.format_exc()}")
+        logger.exception("Task creation failed")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=err_msg)
 
 @app.get("/api/tasks", response_model=list[TaskResponse])
@@ -518,7 +557,7 @@ async def relay_redis_events(sleep=asyncio.sleep):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"[Redis relay] Subscription lost ({e}); retrying in {backoff}s")
+            logger.warning("Redis event relay lost its subscription (%s); retrying in %ss", e, backoff)
             await sleep(backoff)
             backoff = min(backoff * 2, 30)
 

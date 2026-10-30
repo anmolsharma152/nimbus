@@ -1,6 +1,8 @@
 import asyncio
 import json
 import datetime
+import logging
+import time
 from typing import Optional
 import httpx
 from arq import create_pool
@@ -21,6 +23,9 @@ from .workspace import UnifiedWorkspace, get_docker_client, reap_orphaned_contai
 from .github_client import create_draft_pr
 from .llm import LLMChatSession
 from .events import event_bus
+from .logging_config import configure_logging, task_id_var
+
+logger = logging.getLogger(__name__)
 
 
 async def log_event(db: AsyncSession, task_id: int, event_type: EventType, payload_dict: dict):
@@ -37,7 +42,7 @@ async def log_event(db: AsyncSession, task_id: int, event_type: EventType, paylo
     try:
         await event_bus.publish_event(task_id, ev_type_str, payload_dict, ts_str, event_id=event.id)
     except Exception as e:
-        print(f"Failed to publish to Redis Event Bus: {e}")
+        logger.warning("Failed to publish task event to Redis: %s", e)
 
     # 2. HTTP fallback to internal endpoint
     try:
@@ -54,7 +59,8 @@ async def log_event(db: AsyncSession, task_id: int, event_type: EventType, paylo
                 headers={"X-Nimbus-Internal-Token": internal_api_token()}
             )
     except Exception as e:
-        pass
+        # Best effort: Redis pub/sub is the primary path to the API
+        logger.debug("Internal event POST failed: %s", e)
 
 
 async def run_agent_loop(
@@ -65,23 +71,57 @@ async def run_agent_loop(
     git_branch: Optional[str] = None
 ):
     """Runs one agent task under the TASK_TIMEOUT_SECONDS wall-clock limit (also used without arq)."""
+    task_token = task_id_var.set(task_id)
+    stats: dict = {"status": "unknown"}
+    start = time.perf_counter()
     try:
         await asyncio.wait_for(
-            _execute_agent_task(task_id, prompt, repo_url, git_branch),
+            _execute_agent_task(task_id, prompt, repo_url, git_branch, stats),
             timeout=settings.TASK_TIMEOUT_SECONDS
         )
     except TimeoutError:
         # The task already marked itself FAILED and removed its workspace while being cancelled
-        print(f"Task {task_id} exceeded {settings.TASK_TIMEOUT_SECONDS}s time limit.")
+        stats["reason"] = "time_limit"
+        logger.warning("Task exceeded %ss time limit", settings.TASK_TIMEOUT_SECONDS)
+    finally:
+        _log_task_summary(stats, time.perf_counter() - start)
+        task_id_var.reset(task_token)
+
+
+def _log_task_summary(stats: dict, duration_s: float):
+    """One machine-readable line per task: the source for dashboards and alerting."""
+    llm_session = stats.pop("_llm", None)
+    summary = {
+        "event": "task_finished",
+        "duration_s": round(duration_s, 2),
+        "iterations": stats.get("iterations", 0),
+        "commands": stats.get("commands", 0),
+        "patch_chars": stats.get("patch_chars", 0),
+        "pr_opened": stats.get("pr_opened", False),
+        "reason": stats.get("reason"),
+    }
+    if llm_session is not None:
+        summary["llm_calls"] = dict(llm_session.tier_calls)
+        summary["llm_failures"] = dict(llm_session.tier_failures)
+        summary["llm_seconds"] = round(llm_session.llm_seconds, 2)
+    # `status` is a LogRecord-safe name; keep it last so it reads well in text logs
+    summary["task_status"] = stats.get("status")
+    logger.info("Task finished: %s", summary["task_status"], extra=summary)
 
 
 async def _execute_agent_task(
     task_id: int,
     prompt: str,
     repo_url: Optional[str] = None,
-    git_branch: Optional[str] = None
+    git_branch: Optional[str] = None,
+    stats: Optional[dict] = None
 ):
-    print(f"Worker picked up task {task_id}: {prompt} (repo: {repo_url}, branch: {git_branch})")
+    stats = stats if stats is not None else {}
+    # Prompt length only: task prompts can contain private details
+    logger.info(
+        "Worker picked up task",
+        extra={"event": "task_started", "repo_url": repo_url, "branch": git_branch, "prompt_chars": len(prompt)}
+    )
     
     branch_name = git_branch or f"nimbus/task-{task_id}"
     workspace = UnifiedWorkspace(task_id=task_id)
@@ -89,6 +129,7 @@ async def _execute_agent_task(
     async with async_session() as db:
         task = await db.get(Task, task_id)
         if not task:
+            stats["status"] = "missing"
             return
 
         # Look up user details and decrypt vault credentials
@@ -129,7 +170,8 @@ async def _execute_agent_task(
         )
 
         if not has_any_llm_key:
-            print("No LLM API keys configured (user BYOK or server environment). Aborting.")
+            logger.warning("No LLM API keys configured (user BYOK or server environment); failing task")
+            stats.update(status="failed", reason="no_llm_key")
             task.status = TaskStatus.FAILED
             await db.commit()
             await log_event(
@@ -198,6 +240,7 @@ async def _execute_agent_task(
                 groq_api_key=user_groq_key,
                 openrouter_api_key=user_openrouter_key
             )
+            stats["_llm"] = llm_session
 
             # Agent Loop
             current_prompt = (
@@ -210,9 +253,11 @@ async def _execute_agent_task(
             STALL_TIMEOUT_SECONDS = 90  # if no LLM tier responds, fail cleanly instead of eating the task time limit
 
             for iteration in range(max_iterations):
+                stats["iterations"] = iteration + 1
                 # Check for cancellation before turn
                 await db.refresh(task)
                 if task.status == TaskStatus.CANCELLED:
+                    stats["status"] = "cancelled"
                     await log_event(db, task_id, EventType.LOG, {"message": "Task execution cancelled by user."})
                     return
 
@@ -244,6 +289,7 @@ async def _execute_agent_task(
                         await log_event(db, task_id, EventType.COMMAND, {"command": command})
                         
                         # Execute in workspace asynchronously
+                        stats["commands"] = stats.get("commands", 0) + 1
                         exit_code, output = await workspace.aexecute_command(command)
                         
                         # Capture visual screenshot artifact if requested
@@ -277,6 +323,7 @@ async def _execute_agent_task(
             diff_text = await workspace.aget_diff()
             if diff_text:
                 task.patch_diff = diff_text
+                stats["patch_chars"] = len(diff_text)
                 await log_event(
                     db,
                     task_id,
@@ -305,6 +352,7 @@ async def _execute_agent_task(
                         )
                         if pr_url:
                             task.pr_url = pr_url
+                            stats["pr_opened"] = True
                             await log_event(db, task_id, EventType.LOG, {"message": f"Draft PR opened successfully: {pr_url}"})
                         else:
                             await log_event(db, task_id, EventType.LOG, {"message": "Branch pushed, but Draft PR creation failed."})
@@ -313,16 +361,19 @@ async def _execute_agent_task(
 
             task.status = TaskStatus.COMPLETED
             await db.commit()
+            stats["status"] = "completed"
             await log_event(db, task_id, EventType.STATUS, {"status": "completed"})
 
         except Exception as e:
-            print(f"Error in agent loop: {e}")
+            logger.exception("Agent loop failed")
+            stats.update(status="failed", reason=type(e).__name__)
             await log_event(db, task_id, EventType.LOG, {"message": f"Agent failed with exception: {e}"})
             task.status = TaskStatus.FAILED
             await db.commit()
             await log_event(db, task_id, EventType.STATUS, {"status": "failed"})
         except asyncio.CancelledError:
             # Time limit, arq job timeout, or worker shutdown: never leave the task stuck in RUNNING
+            stats.update(status="failed", reason=stats.get("reason") or "interrupted")
             limit_min = round(settings.TASK_TIMEOUT_SECONDS / 60)
             await log_event(db, task_id, EventType.LOG, {
                 "message": f"Agent stopped before finishing: task time limit ({limit_min} min) reached or worker shut down."
@@ -371,9 +422,9 @@ async def enqueue_task(
         await pool.enqueue_job('run_agent_loop', task_id, prompt, repo_url, git_branch)
         await pool.close()
         enqueued = True
-        print(f"Task {task_id} enqueued to Redis queue.")
+        logger.info("Task %s enqueued to Redis queue", task_id)
     except Exception as e:
-        print(f"Redis queue unavailable ({e}). Spawning in-process background worker task.")
+        logger.warning("Redis queue unavailable (%s); running task %s in-process", e, task_id)
     
     if not enqueued:
         # Launch agent loop directly in async event loop background task
@@ -389,12 +440,17 @@ async def reap_orphaned_workspaces(ctx):
     # Volumes after containers: a volume still attached to a container can't be removed
     removed += await asyncio.to_thread(reap_orphaned_volumes, client, max_age)
     if removed:
-        print(f"Reaped {removed} orphaned workspace container(s)/volume(s).")
+        logger.info("Reaped %s orphaned workspace container(s)/volume(s)", removed)
     return removed
+
+
+async def worker_startup(ctx):
+    configure_logging()
 
 
 class WorkerSettings:
     functions = [run_agent_loop]
+    on_startup = worker_startup
     redis_settings = redis_settings
     # Backstop only: run_agent_loop enforces TASK_TIMEOUT_SECONDS itself and fails the task cleanly
     job_timeout = settings.TASK_TIMEOUT_SECONDS + 120

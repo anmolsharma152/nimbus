@@ -90,6 +90,14 @@ class Settings(BaseSettings):
         default="http://localhost:8000",
         description="Base URL for internal WebSocket broadcast gateway."
     )
+    LOG_LEVEL: str = Field(
+        default="INFO",
+        description="Root log level (DEBUG, INFO, WARNING, ...)."
+    )
+    LOG_FORMAT: str = Field(
+        default="text",
+        description="'json' for one JSON object per line (log platforms), 'text' for local reading."
+    )
     DB_ECHO: bool = Field(
         default=False,
         description="Enable raw SQL logging."

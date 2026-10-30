@@ -54,7 +54,7 @@ There are no frontend tests.
 - Request/response shapes are Pydantic `BaseModel`s declared in the router module. Errors surface as `HTTPException`. Ownership failures return **404**, not 403.
 - Workspace methods return `(exit_code, output)` tuples instead of raising. Callers must check the code.
 - Enums are stored upper-case (`TaskStatus`, `EventType`) and serialized lower-case to clients.
-- Logging is currently `print()`. Prefer `logging.getLogger(__name__)` (as in `github_client.py`) for new code.
+- Logging: `logger = logging.getLogger(__name__)`, never `print()`. `app/logging_config.py` adds request_id/task_id to every record; pass structured fields via `extra={"event": ...}`. Never log prompts, tokens or keys (log lengths/ids instead). Each task emits one `task_finished` line (status, duration, iterations, LLM tier usage).
 - TypeScript: functional components + hooks, App Router, CSS modules per page/component.
 - Never commit `.env`. Treat everything executed inside a workspace (LLM output, cloned repo contents) as untrusted.
 
