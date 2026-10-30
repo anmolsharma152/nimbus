@@ -5,6 +5,7 @@ from typing import Optional
 import httpx
 from arq import create_pool
 from arq.connections import RedisSettings
+from arq.cron import cron
 from sqlalchemy.ext.asyncio import AsyncSession
 from google import genai
 from google.genai import types
@@ -16,7 +17,7 @@ from .db import async_session
 from .models import User, UserCredential, Task, TaskEvent, EventType, TaskStatus
 from .settings import settings
 from .security import decrypt_secret, internal_api_token
-from .workspace import UnifiedWorkspace
+from .workspace import UnifiedWorkspace, get_docker_client, reap_orphaned_containers
 from .github_client import create_draft_pr
 from .llm import LLMChatSession
 from .events import event_bus
@@ -57,6 +58,23 @@ async def log_event(db: AsyncSession, task_id: int, event_type: EventType, paylo
 
 async def run_agent_loop(
     ctx,
+    task_id: int,
+    prompt: str,
+    repo_url: Optional[str] = None,
+    git_branch: Optional[str] = None
+):
+    """Runs one agent task under the TASK_TIMEOUT_SECONDS wall-clock limit (also used without arq)."""
+    try:
+        await asyncio.wait_for(
+            _execute_agent_task(task_id, prompt, repo_url, git_branch),
+            timeout=settings.TASK_TIMEOUT_SECONDS
+        )
+    except TimeoutError:
+        # The task already marked itself FAILED and removed its workspace while being cancelled
+        print(f"Task {task_id} exceeded {settings.TASK_TIMEOUT_SECONDS}s time limit.")
+
+
+async def _execute_agent_task(
     task_id: int,
     prompt: str,
     repo_url: Optional[str] = None,
@@ -134,11 +152,13 @@ async def run_agent_loop(
         )
 
         try:
-            _, setup_out = await workspace.asetup(
+            setup_code, setup_out = await workspace.asetup(
                 repo_url=repo_url,
                 branch_name=branch_name,
                 github_token=final_github_token
             )
+            if setup_code != 0:
+                raise RuntimeError(f"Workspace setup failed: {setup_out}")
             if setup_out:
                 await log_event(db, task_id, EventType.LOG, {"message": setup_out})
 
@@ -186,7 +206,7 @@ async def run_agent_loop(
                 "Begin by listing files or inspecting the project structure."
             )
             max_iterations = settings.MAX_AGENT_ITERATIONS
-            STALL_TIMEOUT_SECONDS = 300  # 5 minutes — if LLM doesn't respond, fail cleanly
+            STALL_TIMEOUT_SECONDS = 90  # if no LLM tier responds, fail cleanly instead of eating the task time limit
 
             for iteration in range(max_iterations):
                 # Check for cancellation before turn
@@ -205,7 +225,7 @@ async def run_agent_loop(
                     )
                 except asyncio.TimeoutError:
                     timeout_msg = (
-                        f"Agent timed out: No LLM response received within {STALL_TIMEOUT_SECONDS // 60} minutes. "
+                        f"Agent timed out: No LLM response received within {STALL_TIMEOUT_SECONDS} seconds. "
                         "All providers may be overloaded or rate-limited. Please retry the task later."
                     )
                     await log_event(db, task_id, EventType.LOG, {"message": timeout_msg})
@@ -295,8 +315,19 @@ async def run_agent_loop(
             task.status = TaskStatus.FAILED
             await db.commit()
             await log_event(db, task_id, EventType.STATUS, {"status": "failed"})
+        except asyncio.CancelledError:
+            # Time limit, arq job timeout, or worker shutdown: never leave the task stuck in RUNNING
+            limit_min = round(settings.TASK_TIMEOUT_SECONDS / 60)
+            await log_event(db, task_id, EventType.LOG, {
+                "message": f"Agent stopped before finishing: task time limit ({limit_min} min) reached or worker shut down."
+            })
+            task.status = TaskStatus.FAILED
+            await db.commit()
+            await log_event(db, task_id, EventType.STATUS, {"status": "failed"})
+            raise
         finally:
-            await workspace.acleanup()
+            # Shielded so a second cancellation can't abort container removal midway
+            await asyncio.shield(workspace.acleanup())
 
 def normalize_redis_url(url: Optional[str]) -> str:
     """Sanitizes and normalizes Redis connection strings (handles quotes, cli snippets, empty strings)."""
@@ -342,6 +373,26 @@ async def enqueue_task(
         # Launch agent loop directly in async event loop background task
         asyncio.create_task(run_agent_loop(None, task_id, prompt, repo_url, git_branch))
 
+async def reap_orphaned_workspaces(ctx):
+    """Removes task containers that outlived the task time limit (e.g. after a worker crash)."""
+    client = get_docker_client()
+    if client is None:
+        return 0
+    removed = await asyncio.to_thread(
+        reap_orphaned_containers, client, settings.TASK_TIMEOUT_SECONDS + 600
+    )
+    if removed:
+        print(f"Reaped {removed} orphaned workspace container(s).")
+    return removed
+
+
 class WorkerSettings:
     functions = [run_agent_loop]
     redis_settings = redis_settings
+    # Backstop only: run_agent_loop enforces TASK_TIMEOUT_SECONDS itself and fails the task cleanly
+    job_timeout = settings.TASK_TIMEOUT_SECONDS + 120
+    # A cancelled agent run is marked FAILED; re-running it from scratch is the user's call (Retry button)
+    max_tries = 1
+    cron_jobs = [
+        cron(reap_orphaned_workspaces, minute=set(range(0, 60, 10)), run_at_startup=True)
+    ]

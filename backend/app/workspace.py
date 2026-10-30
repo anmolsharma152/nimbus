@@ -1,7 +1,10 @@
 import os
 import shutil
+import signal
 import asyncio
+import logging
 import subprocess
+import threading
 import time
 from typing import Optional, Tuple
 import shlex
@@ -15,14 +18,76 @@ try:
 except ImportError:
     DOCKER_LIB_INSTALLED = False
 
+logger = logging.getLogger(__name__)
+
+MANAGED_LABEL = "nimbus.managed"
+
+# One Docker client (and its HTTP connection pool) shared by every workspace in the process
+_docker_client = None
+_docker_client_lock = threading.Lock()
+
+
+def get_docker_client():
+    """Returns the shared Docker client if the daemon answers a ping, else None (replacing dead clients)."""
+    global _docker_client
+    if not DOCKER_LIB_INSTALLED:
+        return None
+    with _docker_client_lock:
+        if _docker_client is not None:
+            try:
+                _docker_client.ping()
+                return _docker_client
+            except Exception as e:
+                logger.warning("Cached Docker client failed ping, reconnecting: %s", e)
+                _close_quietly(_docker_client)
+                _docker_client = None
+
+        client = None
+        try:
+            client = docker.from_env()
+            client.ping()
+        except Exception as e:
+            logger.info("Docker daemon unavailable, using subprocess workspace: %s", e)
+            if client is not None:
+                _close_quietly(client)
+            return None
+        _docker_client = client
+        return client
+
+
+def _close_quietly(client):
+    try:
+        client.close()
+    except Exception:
+        pass
+
+
+def reap_orphaned_containers(client, max_age_seconds: float) -> int:
+    """Force-removes Nimbus containers older than max_age_seconds (left behind by crashed workers)."""
+    removed = 0
+    now = time.time()
+    for container in client.containers.list(all=True, filters={"label": f"{MANAGED_LABEL}=true"}):
+        try:
+            created = int(container.labels.get("nimbus.created", "0"))
+        except ValueError:
+            created = 0
+        if now - created < max_age_seconds:
+            continue
+        try:
+            container.remove(force=True)
+            removed += 1
+        except Exception as e:
+            logger.warning("Failed to reap container %s: %s", getattr(container, "name", "?"), e)
+    return removed
+
 
 class DockerWorkspace:
     """Manages an ephemeral Docker container for agent tasks when Docker daemon is reachable."""
-    
-    def __init__(self, task_id: int, image: str = "ubuntu:22.04"):
+
+    def __init__(self, task_id: int, image: str = "ubuntu:22.04", client=None):
         self.task_id = task_id
         self.image = image
-        self.client = docker.from_env()
+        self.client = client or get_docker_client() or docker.from_env()
         self.container: Optional[Container] = None
         self.workdir: str = "/workspace/repo"
 
@@ -48,7 +113,12 @@ class DockerWorkspace:
             nano_cpus=2_000_000_000,
             pids_limit=256,
             cap_drop=["ALL"],
-            security_opt=["no-new-privileges:true"]
+            security_opt=["no-new-privileges:true"],
+            labels={
+                MANAGED_LABEL: "true",
+                "nimbus.task_id": str(self.task_id),
+                "nimbus.created": str(int(time.time())),
+            }
         )
         
         init_commands = (
@@ -181,14 +251,20 @@ class DockerWorkspace:
         return self.execute_command(push_cmd, workdir=self.workdir)
 
     def cleanup(self):
-        if self.container:
-            try:
-                self.container.stop(timeout=2)
-                self.container.remove(force=True)
-            except Exception as e:
-                print(f"Failed to cleanup container: {e}")
-            finally:
-                self.container = None
+        container, self.container = self.container, None
+        if not container:
+            return
+        # stop and remove are independent: a failed graceful stop must never leak the container
+        try:
+            container.stop(timeout=2)
+        except Exception as e:
+            logger.warning("Failed to stop container for task %s: %s", self.task_id, e)
+        try:
+            container.remove(force=True)
+        except docker.errors.NotFound:
+            pass
+        except Exception as e:
+            logger.error("Failed to remove container for task %s: %s", self.task_id, e)
 
 
 class SubprocessWorkspace:
@@ -262,18 +338,31 @@ class SubprocessWorkspace:
         target_dir = workdir or self.workdir
         os.makedirs(target_dir, exist_ok=True)
         try:
-            res = subprocess.run(
+            # Own process group so a timeout kills everything the command spawned, not just bash
+            proc = subprocess.Popen(
                 ["bash", "-c", command],
                 cwd=target_dir,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout
+                start_new_session=True
             )
-            out = (res.stdout or "") + (res.stderr or "")
-            return res.returncode, out.strip()
+        except Exception as e:
+            return 1, f"[Execution failed: {e}]"
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            out = (stdout or "") + (stderr or "")
+            return proc.returncode, out.strip()
         except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.communicate()
             return 124, f"[Command timed out after {timeout} seconds]"
         except Exception as e:
+            proc.kill()
+            proc.communicate()
             return 1, f"[Execution failed: {e}]"
 
     def get_diff(self) -> str:
@@ -332,13 +421,9 @@ class SubprocessWorkspace:
 
 def create_workspace(task_id: int):
     """Factory that returns DockerWorkspace if Docker daemon is running, else SubprocessWorkspace."""
-    if DOCKER_LIB_INSTALLED:
-        try:
-            client = docker.from_env()
-            client.ping()
-            return DockerWorkspace(task_id=task_id)
-        except Exception:
-            pass
+    client = get_docker_client()
+    if client is not None:
+        return DockerWorkspace(task_id=task_id, client=client)
     return SubprocessWorkspace(task_id=task_id)
 
 

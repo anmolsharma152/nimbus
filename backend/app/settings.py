@@ -69,6 +69,10 @@ class Settings(BaseSettings):
         default=20,
         description="Maximum turns allowed for an agent task."
     )
+    TASK_TIMEOUT_SECONDS: float = Field(
+        default=1800,
+        description="Wall-clock limit for one agent task (30 min); the task is failed and its workspace removed."
+    )
     API_INTERNAL_URL: str = Field(
         default="http://localhost:8000",
         description="Base URL for internal WebSocket broadcast gateway."
