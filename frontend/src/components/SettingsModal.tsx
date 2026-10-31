@@ -5,6 +5,16 @@ import styles from "./SettingsModal.module.css";
 import { useAuth } from "../context/AuthContext";
 import { API_BASE } from "@/lib/api";
 
+// Model preferences live in this browser only; this modal is their only writer
+function storedModel(key: string, fallback: string): string {
+  if (typeof window === "undefined") return fallback;
+  try {
+    return localStorage.getItem(key) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -13,11 +23,13 @@ interface SettingsModalProps {
 export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const { user, isAuthenticated } = useAuth();
   const [geminiKey, setGeminiKey] = useState("");
-  const [geminiModel, setGeminiModel] = useState("gemini-3.6-flash");
+  const [geminiModel, setGeminiModel] = useState(() => storedModel("nimbus_gemini_model", "gemini-3.6-flash"));
   const [groqKey, setGroqKey] = useState("");
-  const [groqModel, setGroqModel] = useState("openai/gpt-oss-120b");
+  const [groqModel, setGroqModel] = useState(() => storedModel("nimbus_groq_model", "openai/gpt-oss-120b"));
   const [openrouterKey, setOpenrouterKey] = useState("");
-  const [openrouterModel, setOpenrouterModel] = useState("cohere/north-mini-code:free");
+  const [openrouterModel, setOpenrouterModel] = useState(() =>
+    storedModel("nimbus_openrouter_model", "cohere/north-mini-code:free")
+  );
   
   const [configuredProviders, setConfiguredProviders] = useState<{ [key: string]: boolean }>({});
   const [isSaving, setIsSaving] = useState(false);
@@ -42,12 +54,6 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           }
         })
         .catch((err) => console.warn("Failed to fetch vault credentials:", err));
-    }
-
-    if (typeof window !== "undefined") {
-      setGeminiModel(localStorage.getItem("nimbus_gemini_model") || "gemini-3.6-flash");
-      setGroqModel(localStorage.getItem("nimbus_groq_model") || "openai/gpt-oss-120b");
-      setOpenrouterModel(localStorage.getItem("nimbus_openrouter_model") || "cohere/north-mini-code:free");
     }
   }, [isOpen, isAuthenticated, apiBase]);
 

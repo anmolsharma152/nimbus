@@ -10,6 +10,7 @@ import {
   mergeEvents,
   reconnectDelay,
   STREAM_REJECTED_CODE,
+  parsePayload,
   streamUrl,
 } from "@/lib/taskStream";
 import { API_BASE, WS_BASE } from "@/lib/api";
@@ -137,11 +138,12 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
     const handleMessage = (event: MessageEvent) => {
       try {
         const data = JSON.parse(event.data);
-        const parsedPayload = typeof data.payload === "string" ? JSON.parse(data.payload) : data.payload;
+        const parsedPayload = parsePayload(data.payload);
 
-        if (data.type === "status" && parsedPayload?.status) {
-          setTask((prev) => (prev ? { ...prev, status: parsedPayload.status } : null));
-          if (isTerminalStatus(parsedPayload.status)) {
+        const newStatus = parsedPayload.status;
+        if (data.type === "status" && newStatus) {
+          setTask((prev) => (prev ? { ...prev, status: newStatus } : null));
+          if (isTerminalStatus(newStatus)) {
             // Pick up the final diff / PR link; this effect then closes the stream
             fetch(`${apiBase}/api/tasks/${id}`, { credentials: "include" })
               .then((res) => res.json())
@@ -150,7 +152,8 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
           }
         }
 
-        if (parsedPayload?.screenshot) {
+        const screenshotData = parsedPayload.screenshot;
+        if (screenshotData) {
           const screenshotId = typeof data.id === "number" ? data.id : Date.now();
           setScreenshots((prev) =>
             prev.some((s) => s.id === screenshotId)
@@ -162,7 +165,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
                     task_id: Number(id),
                     filename: parsedPayload.filename || "screenshot.png",
                     caption: parsedPayload.caption || "Live visual capture",
-                    data: parsedPayload.screenshot,
+                    data: screenshotData,
                     created_at: new Date().toISOString(),
                   },
                 ]
@@ -247,12 +250,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
   const handleCopyLogs = () => {
     const logText = events
       .map((ev) => {
-        let parsed: any = {};
-        try {
-          parsed = typeof ev.payload === "string" ? JSON.parse(ev.payload) : ev.payload;
-        } catch {
-          parsed = { message: String(ev.payload) };
-        }
+        const parsed = parsePayload(ev.payload);
         const time = new Date(ev.timestamp).toLocaleTimeString();
         if (ev.type === "command") return `[${time}] $ ${parsed.command}`;
         if (ev.type === "result") return parsed.output;
@@ -619,12 +617,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
                   </div>
                 )}
                 {events.map((ev, idx) => {
-                  let parsed: any = {};
-                  try {
-                    parsed = typeof ev.payload === "string" ? JSON.parse(ev.payload) : ev.payload;
-                  } catch {
-                    parsed = { message: String(ev.payload) };
-                  }
+                  const parsed = parsePayload(ev.payload);
 
                   const evType = (ev.type || "").toLowerCase();
                   if (evType === "log" || evType === "status") {

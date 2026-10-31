@@ -61,3 +61,26 @@ export function streamUrl(wsBase: string, taskId: string | number, after: number
   const query = params.toString();
   return `${wsBase}/ws/tasks/${taskId}${query ? `?${query}` : ""}`;
 }
+
+export interface TaskEventPayload {
+  message?: string;
+  status?: string;
+  command?: string;
+  output?: string;
+  screenshot?: string;
+  filename?: string;
+  caption?: string;
+}
+
+/** Event payloads arrive as JSON strings (REST/WS) or objects; non-JSON text becomes a message. */
+export function parsePayload(payload: unknown): TaskEventPayload {
+  if (typeof payload !== "string") {
+    return payload && typeof payload === "object" ? (payload as TaskEventPayload) : {};
+  }
+  try {
+    const parsed = JSON.parse(payload);
+    return parsed && typeof parsed === "object" ? parsed : { message: String(parsed) };
+  } catch {
+    return { message: payload };
+  }
+}

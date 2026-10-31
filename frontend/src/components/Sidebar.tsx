@@ -27,26 +27,22 @@ export default function Sidebar() {
 
   const apiBase = API_BASE;
 
-  const fetchTasks = async () => {
-    try {
-      const res = await fetch(`${apiBase}/api/tasks?limit=25`, {
-        credentials: "include",
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          setTasks(data);
-        }
-      }
-    } catch (e) {
-      console.warn("Could not load tasks in sidebar:", e);
-    }
-  };
-
   useEffect(() => {
-    fetchTasks();
-    const interval = setInterval(fetchTasks, 4000);
-    return () => clearInterval(interval);
+    let active = true;
+    const loadTasks = () =>
+      fetch(`${apiBase}/api/tasks?limit=25`, { credentials: "include" })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (active && Array.isArray(data)) setTasks(data);
+        })
+        .catch((e) => console.warn("Could not load tasks in sidebar:", e));
+
+    loadTasks();
+    const interval = setInterval(loadTasks, 4000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
   }, [apiBase, user]);
 
   const handleStopTask = async (e: React.MouseEvent, id: number) => {

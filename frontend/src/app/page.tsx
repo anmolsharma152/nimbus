@@ -49,8 +49,8 @@ export default function Home() {
   const [ghUser, setGhUser] = useState("");
   const [customGhUser, setCustomGhUser] = useState("");
   const [isEditingUser, setIsEditingUser] = useState(false);
-  const [repos, setRepos] = useState<GitHubRepo[]>([]);
-  const [isLoadingRepos, setIsLoadingRepos] = useState(false);
+  // Repos are cached per query; loading and the visible list derive from whether the current query has answered
+  const [repoResult, setRepoResult] = useState<{ query: string; repos: GitHubRepo[] } | null>(null);
   const [repoSearchFilter, setRepoSearchFilter] = useState("");
 
   // Settings Modal State
@@ -59,25 +59,24 @@ export default function Home() {
   const router = useRouter();
   const apiBase = API_BASE;
 
-  // Sync ghUser with authenticated user when logged in
-  useEffect(() => {
-    if (user?.username) {
-      setGhUser(user.username);
-    }
-  }, [user]);
+  // Default the repo owner to the signed-in user (adjusting state during render, not in an effect)
+  const [syncedUsername, setSyncedUsername] = useState<string | null>(null);
+  if (user?.username && user.username !== syncedUsername) {
+    setSyncedUsername(user.username);
+    setGhUser(user.username);
+  }
+
+  const repoQuery =
+    ghUser || user ? `${apiBase}/api/repos${ghUser ? `?username_override=${encodeURIComponent(ghUser)}` : ""}` : null;
+  const repos = repoQuery && repoResult?.query === repoQuery ? repoResult.repos : [];
+  const isLoadingRepos = repoQuery !== null && repoResult?.query !== repoQuery;
 
   // Dynamically fetch repositories from backend /api/repos proxy
   useEffect(() => {
-    if (!ghUser && !user) {
-      setRepos([]);
-      return;
-    }
+    if (!repoQuery) return;
 
     let isMounted = true;
-    setIsLoadingRepos(true);
-
-    const queryUrl = `${apiBase}/api/repos${ghUser ? `?username_override=${encodeURIComponent(ghUser)}` : ""}`;
-    fetch(queryUrl, {
+    fetch(repoQuery, {
       credentials: "include", // send session cookie if authenticated
     })
       .then((res) => {
@@ -85,21 +84,17 @@ export default function Home() {
         return res.json();
       })
       .then((data) => {
-        if (isMounted && Array.isArray(data)) {
-          setRepos(data);
-        }
+        if (isMounted) setRepoResult({ query: repoQuery, repos: Array.isArray(data) ? data : [] });
       })
       .catch((err) => {
         console.warn("GitHub fetch notice:", err);
-      })
-      .finally(() => {
-        if (isMounted) setIsLoadingRepos(false);
+        if (isMounted) setRepoResult({ query: repoQuery, repos: [] });
       });
 
     return () => {
       isMounted = false;
     };
-  }, [ghUser, apiBase, user]);
+  }, [repoQuery]);
 
   const handleFetchUserRepos = (e: React.FormEvent) => {
     e.preventDefault();
@@ -134,10 +129,10 @@ export default function Home() {
 
       const data = await res.json();
       router.push(`/tasks/${data.id}`);
-    } catch (err: any) {
+    } catch (err) {
       console.error(err);
       setErrorMessage(
-        err.message || "Failed to connect to backend control plane. Please check connection and try again."
+        (err instanceof Error && err.message) || "Failed to connect to backend control plane. Please check connection and try again."
       );
       setIsSubmitting(false);
     }
