@@ -12,10 +12,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Set up git user defaults
-RUN git config --global user.name "Nimbus Agent" && \
-    git config --global user.email "agent@nimbus.ai" && \
-    git config --global --add safe.directory "*"
+# System-level git defaults so they apply to the unprivileged agent user
+RUN git config --system user.name "Nimbus Agent" && \
+    git config --system user.email "agent@nimbus.ai" && \
+    git config --system --add safe.directory "*"
 
+# Agent commands and git helpers run as this user (UID must match WORKSPACE_USER in app/workspace.py).
+# /workspace ownership is copied into each task's fresh volume on first mount.
+RUN useradd --uid 10001 --create-home --shell /bin/bash agent && \
+    mkdir -p /workspace && chown agent:agent /workspace
+
+USER agent
 WORKDIR /workspace
 CMD ["tail", "-f", "/dev/null"]

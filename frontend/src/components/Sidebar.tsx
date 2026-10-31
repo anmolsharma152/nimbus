@@ -6,6 +6,7 @@ import { useRouter, usePathname } from "next/navigation";
 import styles from "./Sidebar.module.css";
 import SettingsModal from "./SettingsModal";
 import { useAuth } from "../context/AuthContext";
+import { API_BASE } from "@/lib/api";
 
 export interface TaskItem {
   id: number;
@@ -24,28 +25,24 @@ export default function Sidebar() {
   const router = useRouter();
   const pathname = usePathname();
 
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
-
-  const fetchTasks = async () => {
-    try {
-      const res = await fetch(`${apiBase}/api/tasks?limit=25`, {
-        credentials: "include",
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          setTasks(data);
-        }
-      }
-    } catch (e) {
-      console.warn("Could not load tasks in sidebar:", e);
-    }
-  };
+  const apiBase = API_BASE;
 
   useEffect(() => {
-    fetchTasks();
-    const interval = setInterval(fetchTasks, 4000);
-    return () => clearInterval(interval);
+    let active = true;
+    const loadTasks = () =>
+      fetch(`${apiBase}/api/tasks?limit=25`, { credentials: "include" })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (active && Array.isArray(data)) setTasks(data);
+        })
+        .catch((e) => console.warn("Could not load tasks in sidebar:", e));
+
+    loadTasks();
+    const interval = setInterval(loadTasks, 4000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
   }, [apiBase, user]);
 
   const handleStopTask = async (e: React.MouseEvent, id: number) => {

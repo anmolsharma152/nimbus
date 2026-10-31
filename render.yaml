@@ -15,10 +15,15 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
-      - key: GITHUB_TOKEN
-        sync: false
       - key: GEMINI_MODEL
         value: gemini-3.6-flash
+      - key: LOG_FORMAT
+        value: json
+      - key: FRONTEND_URL
+        value: https://nimbusagent.vercel.app
+      # GitHub returns through the frontend's /api proxy so the session cookie is first-party
+      - key: OAUTH_REDIRECT_BASE_URL
+        value: https://nimbusagent.vercel.app
 
 databases:
   # 2. PostgreSQL Database

@@ -6,6 +6,8 @@ import Link from "next/link";
 import styles from "./page.module.css";
 import SettingsModal from "../components/SettingsModal";
 import { useAuth } from "../context/AuthContext";
+import { API_BASE } from "@/lib/api";
+import { filterRepos } from "@/lib/repos";
 
 const PROMPT_PRESETS = [
   {
@@ -48,35 +50,34 @@ export default function Home() {
   const [ghUser, setGhUser] = useState("");
   const [customGhUser, setCustomGhUser] = useState("");
   const [isEditingUser, setIsEditingUser] = useState(false);
-  const [repos, setRepos] = useState<GitHubRepo[]>([]);
-  const [isLoadingRepos, setIsLoadingRepos] = useState(false);
+  // Repos are cached per query; loading and the visible list derive from whether the current query has answered
+  const [repoResult, setRepoResult] = useState<{ query: string; repos: GitHubRepo[] } | null>(null);
   const [repoSearchFilter, setRepoSearchFilter] = useState("");
 
   // Settings Modal State
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   const router = useRouter();
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
+  const apiBase = API_BASE;
 
-  // Sync ghUser with authenticated user when logged in
-  useEffect(() => {
-    if (user?.username) {
-      setGhUser(user.username);
-    }
-  }, [user]);
+  // Default the repo owner to the signed-in user (adjusting state during render, not in an effect)
+  const [syncedUsername, setSyncedUsername] = useState<string | null>(null);
+  if (user?.username && user.username !== syncedUsername) {
+    setSyncedUsername(user.username);
+    setGhUser(user.username);
+  }
+
+  const repoQuery =
+    ghUser || user ? `${apiBase}/api/repos${ghUser ? `?username_override=${encodeURIComponent(ghUser)}` : ""}` : null;
+  const repos = repoQuery && repoResult?.query === repoQuery ? repoResult.repos : [];
+  const isLoadingRepos = repoQuery !== null && repoResult?.query !== repoQuery;
 
   // Dynamically fetch repositories from backend /api/repos proxy
   useEffect(() => {
-    if (!ghUser && !user) {
-      setRepos([]);
-      return;
-    }
+    if (!repoQuery) return;
 
     let isMounted = true;
-    setIsLoadingRepos(true);
-
-    const queryUrl = `${apiBase}/api/repos${ghUser ? `?username_override=${encodeURIComponent(ghUser)}` : ""}`;
-    fetch(queryUrl, {
+    fetch(repoQuery, {
       credentials: "include", // send session cookie if authenticated
     })
       .then((res) => {
@@ -84,21 +85,17 @@ export default function Home() {
         return res.json();
       })
       .then((data) => {
-        if (isMounted && Array.isArray(data)) {
-          setRepos(data);
-        }
+        if (isMounted) setRepoResult({ query: repoQuery, repos: Array.isArray(data) ? data : [] });
       })
       .catch((err) => {
         console.warn("GitHub fetch notice:", err);
-      })
-      .finally(() => {
-        if (isMounted) setIsLoadingRepos(false);
+        if (isMounted) setRepoResult({ query: repoQuery, repos: [] });
       });
 
     return () => {
       isMounted = false;
     };
-  }, [ghUser, apiBase, user]);
+  }, [repoQuery]);
 
   const handleFetchUserRepos = (e: React.FormEvent) => {
     e.preventDefault();
@@ -133,19 +130,16 @@ export default function Home() {
 
       const data = await res.json();
       router.push(`/tasks/${data.id}`);
-    } catch (err: any) {
+    } catch (err) {
       console.error(err);
       setErrorMessage(
-        err.message || "Failed to connect to backend control plane. Please check connection and try again."
+        (err instanceof Error && err.message) || "Failed to connect to backend control plane. Please check connection and try again."
       );
       setIsSubmitting(false);
     }
   };
 
-  const filteredRepos = repos.filter((r) =>
-    r.name.toLowerCase().includes(repoSearchFilter.toLowerCase()) ||
-    (r.description && r.description.toLowerCase().includes(repoSearchFilter.toLowerCase()))
-  );
+  const filteredRepos = filterRepos(repos, repoSearchFilter, repoUrl);
 
   // 1. GUEST / FIRST-TIME VISITOR LANDING PAGE
   if (!isAuthenticated && !isAuthLoading) {
@@ -212,7 +206,7 @@ export default function Home() {
               <span className={styles.featureIcon}>🐳</span>
               <h3 className={styles.featureTitle}>Hardened Sandboxes</h3>
               <p className={styles.featureDesc}>
-                Each task executes inside an ephemeral microVM container with strict cgroups memory & CPU limits, dropped capabilities, and no-new-privileges flags.
+                Each task runs in its own disposable workspace as an unprivileged user with a scrubbed environment, and your GitHub token never enters it.
               </p>
             </div>
             <div className={styles.featureCard}>
@@ -473,14 +467,27 @@ export default function Home() {
               {/* Complete Repository Dropdown Select */}
               {repos.length > 0 && (
                 <div style={{ marginBottom: "10px" }}>
+                  <input
+                    type="search"
+                    className={styles.repoInput}
+                    style={{ marginBottom: "8px" }}
+                    placeholder={`Search ${repos.length} repositories by name, language or description`}
+                    aria-label="Search repositories"
+                    value={repoSearchFilter}
+                    onChange={(e) => setRepoSearchFilter(e.target.value)}
+                  />
                   <select
                     className={styles.repoInput}
                     style={{ cursor: "pointer", background: "#0b0c15", padding: "10px 12px", marginBottom: "8px" }}
                     value={repoUrl}
                     onChange={(e) => setRepoUrl(e.target.value)}
                   >
-                    <option value="">-- Choose from {repos.length} repositories of @{ghUser} --</option>
-                    {repos.map((repo) => (
+                    <option value="">
+                      {repoSearchFilter.trim()
+                        ? `-- ${filteredRepos.length} of ${repos.length} repositories match --`
+                        : `-- Choose from ${repos.length} repositories of @${ghUser} --`}
+                    </option>
+                    {filteredRepos.map((repo) => (
                       <option key={repo.id} value={repo.html_url}>
                         {repo.name} {repo.language ? `[${repo.language}]` : ""} {repo.stargazers_count > 0 ? `(⭐${repo.stargazers_count})` : ""}
                       </option>

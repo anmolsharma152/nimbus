@@ -2,7 +2,7 @@ from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
 
-from .settings import settings
+from .settings import settings, secret_value
 
 
 def normalize_async_db_url(url: str) -> str:
@@ -13,7 +13,7 @@ def normalize_async_db_url(url: str) -> str:
     return url
 
 
-db_url = normalize_async_db_url(settings.DATABASE_URL)
+db_url = normalize_async_db_url(secret_value(settings.DATABASE_URL))
 
 # Configure production connection pool settings (safe for both PostgreSQL and SQLite in tests)
 engine_kwargs = {"echo": settings.DB_ECHO}

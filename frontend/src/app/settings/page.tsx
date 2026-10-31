@@ -1,9 +1,10 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import styles from "./settings.module.css";
 import { useAuth } from "../../context/AuthContext";
+import { API_BASE } from "@/lib/api";
 
 interface CredentialStatus {
   provider: string;
@@ -18,28 +19,34 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
+  const apiBase = API_BASE;
 
-  const fetchCredentials = async () => {
-    if (!isAuthenticated) return;
+  const loadCredentials = useCallback(async (): Promise<CredentialStatus[] | null> => {
+    if (!isAuthenticated) return null;
     try {
-      const res = await fetch(`${apiBase}/api/settings/credentials`, {
-        credentials: "include",
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          setCredentials(data);
-        }
-      }
+      const res = await fetch(`${apiBase}/api/settings/credentials`, { credentials: "include" });
+      const data = res.ok ? await res.json() : null;
+      return Array.isArray(data) ? data : null;
     } catch (err) {
       console.warn("Failed to load credentials:", err);
+      return null;
     }
-  };
+  }, [isAuthenticated, apiBase]);
+
+  const fetchCredentials = () =>
+    loadCredentials().then((data) => {
+      if (data) setCredentials(data);
+    });
 
   useEffect(() => {
-    fetchCredentials();
-  }, [isAuthenticated, apiBase]);
+    let active = true;
+    loadCredentials().then((data) => {
+      if (active && data) setCredentials(data);
+    });
+    return () => {
+      active = false;
+    };
+  }, [loadCredentials]);
 
   const handleSaveCredential = async (provider: string) => {
     const val = inputValues[provider]?.trim();
@@ -64,8 +71,8 @@ export default function SettingsPage() {
         const err = await res.json();
         setStatusMsg(`❌ Failed: ${err.detail || "Error saving key"}`);
       }
-    } catch (err: any) {
-      setStatusMsg(`❌ Error: ${err.message}`);
+    } catch (err) {
+      setStatusMsg(`❌ Error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setLoading(false);
     }
@@ -87,8 +94,8 @@ export default function SettingsPage() {
         setStatusMsg(`✓ Removed ${provider} credential.`);
         fetchCredentials();
       }
-    } catch (err: any) {
-      setStatusMsg(`❌ Error: ${err.message}`);
+    } catch (err) {
+      setStatusMsg(`❌ Error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setLoading(false);
     }

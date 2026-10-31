@@ -1,12 +1,20 @@
+import io
 import os
+import re
 import shutil
+import signal
+import tarfile
+import tempfile
 import asyncio
+import logging
 import subprocess
+import threading
 import time
 from typing import Optional, Tuple
 import shlex
 import base64
 from .github_client import parse_github_repo
+from .settings import settings
 
 try:
     import docker
@@ -15,84 +23,368 @@ try:
 except ImportError:
     DOCKER_LIB_INSTALLED = False
 
+logger = logging.getLogger(__name__)
+
+MANAGED_LABEL = "nimbus.managed"
+# Unprivileged user baked into backend/Dockerfile.workspace
+WORKSPACE_USER = "10001:10001"
+# Subprocess mode: per-task UIDs (no passwd entry needed) far above normal user/system ranges
+SANDBOX_UID_BASE = 200_000
+SANDBOX_UID_RANGE = 100_000
+
+# One Docker client (and its HTTP connection pool) shared by every workspace in the process
+_docker_client = None
+_docker_client_lock = threading.Lock()
+
+
+def get_docker_client():
+    """Returns the shared Docker client if the daemon answers a ping, else None (replacing dead clients)."""
+    global _docker_client
+    if not DOCKER_LIB_INSTALLED:
+        return None
+    with _docker_client_lock:
+        if _docker_client is not None:
+            try:
+                _docker_client.ping()
+                return _docker_client
+            except Exception as e:
+                logger.warning("Cached Docker client failed ping, reconnecting: %s", e)
+                _close_quietly(_docker_client)
+                _docker_client = None
+
+        client = None
+        try:
+            client = docker.from_env()
+            client.ping()
+        except Exception as e:
+            logger.info("Docker daemon unavailable, using subprocess workspace: %s", e)
+            if client is not None:
+                _close_quietly(client)
+            return None
+        _docker_client = client
+        return client
+
+
+def _close_quietly(client):
+    try:
+        client.close()
+    except Exception:
+        pass
+
+
+def reap_orphaned_containers(client, max_age_seconds: float) -> int:
+    """Force-removes Nimbus containers older than max_age_seconds (left behind by crashed workers)."""
+    removed = 0
+    now = time.time()
+    for container in client.containers.list(all=True, filters={"label": f"{MANAGED_LABEL}=true"}):
+        try:
+            created = int(container.labels.get("nimbus.created", "0"))
+        except ValueError:
+            created = 0
+        if now - created < max_age_seconds:
+            continue
+        try:
+            container.remove(force=True)
+            removed += 1
+        except Exception as e:
+            logger.warning("Failed to reap container %s: %s", getattr(container, "name", "?"), e)
+    return removed
+
+
+def reap_orphaned_volumes(client, max_age_seconds: float) -> int:
+    """Removes Nimbus repo volumes older than max_age_seconds whose containers are gone."""
+    removed = 0
+    now = time.time()
+    for volume in client.volumes.list(filters={"label": f"{MANAGED_LABEL}=true"}):
+        labels = (getattr(volume, "attrs", None) or {}).get("Labels") or {}
+        try:
+            created = int(labels.get("nimbus.created", "0"))
+        except ValueError:
+            created = 0
+        if now - created < max_age_seconds:
+            continue
+        try:
+            volume.remove(force=True)
+            removed += 1
+        except Exception as e:
+            logger.warning("Failed to reap volume %s: %s", getattr(volume, "name", "?"), e)
+    return removed
+
+
+# --- Token-safe git operations ---
+#
+# The agent controls everything inside its workspace, including the repo's .git directory
+# (hooks, `url.*.insteadOf`, `core.fsmonitor`, ...). Commands that hold the GitHub token therefore
+# never run as the agent's user and never touch the agent's .git: clone happens before the agent
+# starts, and push replays the agent's patch onto a fresh private clone.
+
+GITHUB_HTTPS_PREFIX = "https://github.com/"
+SANDBOX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def git_auth_env(github_token: Optional[str]) -> dict:
+    """Git config passed via GIT_CONFIG_* env vars, so the token never appears in a process cmdline.
+
+    The auth header is scoped to https://github.com/ so it is never sent to any other host.
+    """
+    entries = [("core.hooksPath", "/dev/null")]
+    if github_token:
+        header = base64.b64encode(f"x-access-token:{github_token}".encode()).decode()
+        entries.append((f"http.{GITHUB_HTTPS_PREFIX}.extraheader", f"AUTHORIZATION: basic {header}"))
+    env = {"GIT_CONFIG_COUNT": str(len(entries)), "GIT_TERMINAL_PROMPT": "0"}
+    for i, (key, value) in enumerate(entries):
+        env[f"GIT_CONFIG_KEY_{i}"] = key
+        env[f"GIT_CONFIG_VALUE_{i}"] = value
+    return env
+
+
+def resolve_clone_url(repo_url: str, github_token: Optional[str]) -> str:
+    cleaned_url = repo_url.strip()
+    parsed = parse_github_repo(cleaned_url)
+    if github_token and parsed:
+        owner, repo = parsed
+        return f"{GITHUB_HTTPS_PREFIX}{owner}/{repo}.git"
+    return cleaned_url
+
+
+def clone_script(clone_url: str, dest: str) -> str:
+    """Clones and prints the base commit SHA (nothing for an empty repository)."""
+    return (
+        f"git clone -- {shlex.quote(clone_url)} {shlex.quote(dest)} && "
+        f"(git -C {shlex.quote(dest)} rev-parse HEAD 2>/dev/null || true)"
+    )
+
+
+def parse_base_sha(output: str) -> Optional[str]:
+    for line in reversed(output.splitlines()):
+        if _SHA_RE.match(line.strip()):
+            return line.strip()
+    return None
+
+
+def patch_script(base_sha: str) -> str:
+    """Run inside the agent workspace: every change since the base commit, binary-safe."""
+    return f"git add -A && git diff --cached --binary {shlex.quote(base_sha)}"
+
+
+def push_script(
+    remote_url: str,
+    base_sha: str,
+    branch_name: str,
+    patch_path: str,
+    workdir: str,
+    message: str,
+    author_name: str,
+    author_email: str,
+    push_url: Optional[str] = None,
+    expect_sha: Optional[str] = None
+) -> str:
+    """Rebuilds the agent's change on the base commit from remote_url and pushes it to push_url
+    (a fork) or back to remote_url. Prints the pushed commit's SHA last."""
+    q = shlex.quote
+    lines = [
+        "set -e",
+        f"git init -q {q(workdir)}",
+        f"cd {q(workdir)}",
+        f"git remote add origin {q(remote_url)}",
+        # A fork may lack the base commit's history, so pushing there needs the full history
+        f"git fetch -q origin {q(base_sha)}" if push_url else f"git fetch -q --depth 1 origin {q(base_sha)}",
+        f"git checkout -q -b {q(branch_name)} FETCH_HEAD",
+        f"git apply --index {q(patch_path)}",
+        f"git -c user.name={q(author_name)} -c user.email={q(author_email)} commit -q -m {q(message)}",
+    ]
+    target = "origin"
+    if push_url:
+        lines.append(f"git remote add target {q(push_url)}")
+        target = "target"
+    # The lease names what the branch must currently be on the remote: nothing for a new branch
+    # (so no existing branch, the default included, is ever touched), or the commit Nimbus itself
+    # pushed last for a follow-up (replaced only if nobody else has pushed since)
+    lease = f"refs/heads/{branch_name}:{expect_sha or ''}"
+    lines.append(
+        f"git push -q --force-with-lease={q(lease)} {target} {q('HEAD:refs/heads/' + branch_name)}"
+    )
+    lines.append("git rev-parse HEAD")
+    return "\n".join(lines)
+
+
+def check_start_point(start_point: Optional[str]) -> Optional[str]:
+    if start_point is not None and not _SHA_RE.match(start_point):
+        raise ValueError("start_point must be a full commit SHA")
+    return start_point
+
+
+PRIOR_PATCH_NAME = "nimbus-prior.patch"
+
+
+def apply_patch_command(patch_path: str) -> str:
+    return f"git apply --whitespace=nowarn {shlex.quote(patch_path)}; rc=$?; rm -f {shlex.quote(patch_path)}; exit $rc"
+
+
+def github_push_url(repo_url: str) -> Optional[str]:
+    parsed = parse_github_repo(repo_url)
+    if not parsed:
+        return None
+    owner, repo = parsed
+    return f"{GITHUB_HTTPS_PREFIX}{owner}/{repo}.git"
+
+
+def clean_commit_message(message: str) -> str:
+    return message.replace("'", "").replace("\n", " ").strip()[:100]
+
+
+def _tar_bytes(files: dict) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
 
 class DockerWorkspace:
-    """Manages an ephemeral Docker container for agent tasks when Docker daemon is reachable."""
-    
-    def __init__(self, task_id: int, image: str = "ubuntu:22.04"):
+    """Manages an ephemeral Docker container for agent tasks when Docker daemon is reachable.
+
+    The agent container runs as an unprivileged user from WORKSPACE_IMAGE (backend/Dockerfile.workspace)
+    with the repo on a per-task volume. Git operations that need the GitHub token run in short-lived
+    helper containers, so the token never enters the agent's container.
+    """
+
+    REPO_DIR = "/workspace/repo"
+
+    def __init__(self, task_id: int, image: Optional[str] = None, client=None):
         self.task_id = task_id
-        self.image = image
-        self.client = docker.from_env()
+        self.image = image or settings.WORKSPACE_IMAGE
+        self.client = client or get_docker_client() or docker.from_env()
         self.container: Optional[Container] = None
-        self.workdir: str = "/workspace/repo"
+        self.volume_name: Optional[str] = None
+        self.base_sha: Optional[str] = None
+        self.workdir: str = self.REPO_DIR
+
+    def _labels(self) -> dict:
+        return {
+            MANAGED_LABEL: "true",
+            "nimbus.task_id": str(self.task_id),
+            "nimbus.created": str(int(time.time())),
+        }
+
+    def _sandbox_kwargs(self) -> dict:
+        """Isolation settings shared by the agent container and git helper containers."""
+        return dict(
+            user=WORKSPACE_USER,
+            mem_limit="1g",
+            nano_cpus=2_000_000_000,
+            pids_limit=256,
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges:true"],
+            labels=self._labels(),
+        )
+
+    def _ensure_image(self) -> Optional[str]:
+        try:
+            self.client.images.get(self.image)
+            return None
+        except docker.errors.ImageNotFound:
+            pass
+        try:
+            logger.info("Pulling workspace image %s", self.image)
+            self.client.images.pull(self.image)
+            return None
+        except Exception as e:
+            return (
+                f"Workspace image '{self.image}' is not available ({e}). Build it with: "
+                "docker build -f backend/Dockerfile.workspace -t nimbus-workspace backend"
+            )
+
+    def _run_helper(
+        self,
+        script: str,
+        environment: dict,
+        mount_repo_volume: bool,
+        files: Optional[dict] = None,
+        timeout: int = 300
+    ) -> Tuple[int, str]:
+        """Runs a one-shot helper container (as the unprivileged user) and always removes it."""
+        helper = self.client.containers.create(
+            self.image,
+            command=["bash", "-c", script],
+            environment=environment,
+            working_dir="/tmp",
+            volumes={self.volume_name: {"bind": "/workspace", "mode": "rw"}} if mount_repo_volume else None,
+            **self._sandbox_kwargs()
+        )
+        try:
+            if files:
+                helper.put_archive("/tmp", _tar_bytes(files))
+            helper.start()
+            try:
+                status_code = helper.wait(timeout=timeout).get("StatusCode", 1)
+            except Exception:
+                return 124, f"[Git helper timed out after {timeout} seconds]"
+            output = helper.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
+            return status_code, output.strip()
+        finally:
+            try:
+                helper.remove(force=True)
+            except Exception as e:
+                logger.warning("Failed to remove git helper container for task %s: %s", self.task_id, e)
 
     def setup(
         self,
         repo_url: Optional[str] = None,
         branch_name: Optional[str] = None,
-        github_token: Optional[str] = None
+        github_token: Optional[str] = None,
+        start_point: Optional[str] = None
     ) -> Tuple[int, str]:
-        try:
-            self.client.images.get(self.image)
-        except docker.errors.ImageNotFound:
-            print(f"Pulling image {self.image}...")
-            self.client.images.pull(self.image)
+        check_start_point(start_point)
+        image_error = self._ensure_image()
+        if image_error:
+            return 1, image_error
 
+        volume = self.client.volumes.create(
+            name=f"nimbus-task-{self.task_id}-{int(time.time())}", labels=self._labels()
+        )
+        self.volume_name = volume.name
+
+        logs = []
+        if repo_url:
+            cleaned_url = repo_url.strip()
+            code, out = self._run_helper(
+                clone_script(resolve_clone_url(cleaned_url, github_token), self.REPO_DIR),
+                environment=git_auth_env(github_token),
+                mount_repo_volume=True
+            )
+            if code != 0:
+                return code, f"Failed to clone repository {cleaned_url}: {out}"
+            self.base_sha = start_point or parse_base_sha(out)
+            logs.append(f"Cloned {cleaned_url}")
+
+        # The agent container starts only after every token-bearing process has exited
         self.container = self.client.containers.run(
             self.image,
             command="tail -f /dev/null",
             detach=True,
             name=f"nimbus-task-{self.task_id}-{int(time.time())}",
             working_dir="/workspace",
-            mem_limit="1g",
-            nano_cpus=2_000_000_000,
-            pids_limit=256,
-            cap_drop=["ALL"],
-            security_opt=["no-new-privileges:true"]
+            volumes={self.volume_name: {"bind": "/workspace", "mode": "rw"}},
+            **self._sandbox_kwargs()
         )
-        
-        init_commands = (
-            "mkdir -p /workspace && "
-            "(which git >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends git curl python3 build-essential)) && "
-            "git config --global user.name 'Nimbus Agent' && "
-            "git config --global user.email 'agent@nimbus.ai' && "
-            "git config --global --add safe.directory '*'"
-        )
-        code, out = self.execute_command(init_commands, workdir="/workspace")
-        if code != 0:
-            return code, f"Failed to initialize workspace environment: {out}"
 
-        logs = []
         if repo_url:
-            cleaned_url = repo_url.strip()
-            if github_token:
-                parsed = parse_github_repo(cleaned_url)
-                if parsed:
-                    owner, repo = parsed
-                    auth_header = base64.b64encode(f"x-access-token:{github_token}".encode()).decode()
-                    clone_cmd = (
-                        f"git -c http.extraheader='AUTHORIZATION: basic {auth_header}' "
-                        f"clone https://github.com/{shlex.quote(owner)}/{shlex.quote(repo)}.git /workspace/repo"
-                    )
-                else:
-                    clone_cmd = f"git clone {shlex.quote(cleaned_url)} /workspace/repo"
-            else:
-                clone_cmd = f"git clone {shlex.quote(cleaned_url)} /workspace/repo"
-
-            code, out = self.execute_command(clone_cmd, workdir="/workspace")
-            if code != 0:
-                return code, f"Failed to clone repository {cleaned_url}: {out}"
-            logs.append(f"Cloned {cleaned_url}")
 
             if branch_name:
+                start = f" {start_point}" if start_point else ""
                 code_b, out_b = self.execute_command(
-                    f"git checkout -b {shlex.quote(branch_name)}",
+                    f"git checkout -b {shlex.quote(branch_name)}{start}",
                     workdir="/workspace/repo"
                 )
                 if code_b != 0:
                     return code_b, f"Failed to create branch {branch_name}: {out_b}"
                 logs.append(f"Created branch {branch_name}")
-            self.workdir = "/workspace/repo"
+            self.workdir = self.REPO_DIR
         else:
             init_repo = (
                 "mkdir -p /workspace/repo && "
@@ -107,9 +399,18 @@ class DockerWorkspace:
             code_init, out_init = self.execute_command(init_repo, workdir="/workspace")
             if code_init != 0:
                 return code_init, f"Failed to initialize empty repository: {out_init}"
-            self.workdir = "/workspace/repo"
+            self.workdir = self.REPO_DIR
 
         return 0, "\n".join(logs)
+
+    def _exec_stdout(self, command: str, timeout: int = 300) -> Tuple[int, bytes]:
+        """Like execute_command but returns raw stdout bytes (needed for binary patches)."""
+        exec_result = self.container.exec_run(
+            cmd=["bash", "-c", f"timeout {timeout} bash -c {shlex.quote(command)}"],
+            workdir=self.workdir,
+            demux=True
+        )
+        return exec_result.exit_code, exec_result.output[0] or b""
 
     def execute_command(self, command: str, workdir: Optional[str] = None, timeout: int = 300) -> Tuple[int, str]:
         if not self.container:
@@ -133,6 +434,14 @@ class DockerWorkspace:
         if exit_code == 124:
             output += f"\n[Command timed out after {timeout} seconds]"
         return exit_code, output.strip()
+
+    def apply_patch(self, patch: str) -> Tuple[int, str]:
+        """Re-applies a previous run's change (uncommitted) in the agent container."""
+        if not self.container:
+            return 1, "Workspace is not running."
+        data = patch if patch.endswith("\n") else patch + "\n"
+        self.container.put_archive("/tmp", _tar_bytes({PRIOR_PATCH_NAME: data.encode()}))
+        return self.execute_command(apply_patch_command(f"/tmp/{PRIOR_PATCH_NAME}"), workdir=self.workdir)
 
     def get_diff(self) -> str:
         if not self.container:
@@ -163,78 +472,179 @@ class DockerWorkspace:
         self,
         branch_name: str,
         repo_url: str,
-        github_token: Optional[str] = None
+        github_token: Optional[str] = None,
+        message: str = "Nimbus agent automated changes",
+        author_name: str = "Nimbus Agent",
+        author_email: str = "agent@nimbus.ai",
+        push_url: Optional[str] = None,
+        expect_sha: Optional[str] = None
     ) -> Tuple[int, str]:
+        """Replays the agent's changes onto a fresh clone inside a helper container and pushes it."""
         if not github_token:
             return 1, "No GitHub token available to push branch."
-
-        parsed = parse_github_repo(repo_url)
-        if not parsed:
+        remote_url = github_push_url(repo_url)
+        if not remote_url:
             return 1, f"Could not parse repo from {repo_url}"
+        if not self.base_sha:
+            return 1, "No base commit recorded (empty repository?); cannot push."
 
-        owner, repo = parsed
-        auth_header = base64.b64encode(f"x-access-token:{github_token}".encode()).decode()
-        push_cmd = (
-            f"git -c http.extraheader='AUTHORIZATION: basic {auth_header}' "
-            f"push https://github.com/{shlex.quote(owner)}/{shlex.quote(repo)}.git {shlex.quote(branch_name)}"
+        code, patch = self._exec_stdout(patch_script(self.base_sha))
+        if code != 0:
+            return code, "Failed to collect workspace changes for push."
+        if not patch.strip():
+            return 1, "No changes to push."
+
+        return self._run_helper(
+            push_script(
+                remote_url, self.base_sha, branch_name, "/tmp/changes.patch", "/tmp/push",
+                clean_commit_message(message), author_name, author_email, push_url, expect_sha
+            ),
+            environment=git_auth_env(github_token),
+            mount_repo_volume=False,
+            files={"changes.patch": patch}
         )
-        return self.execute_command(push_cmd, workdir=self.workdir)
 
     def cleanup(self):
-        if self.container:
+        container, self.container = self.container, None
+        volume_name, self.volume_name = self.volume_name, None
+        # Each step is independent: a failed graceful stop must never leak the container or volume
+        if container:
             try:
-                self.container.stop(timeout=2)
-                self.container.remove(force=True)
+                container.stop(timeout=2)
             except Exception as e:
-                print(f"Failed to cleanup container: {e}")
-            finally:
-                self.container = None
+                logger.warning("Failed to stop container for task %s: %s", self.task_id, e)
+            try:
+                container.remove(force=True)
+            except docker.errors.NotFound:
+                pass
+            except Exception as e:
+                logger.error("Failed to remove container for task %s: %s", self.task_id, e)
+        if volume_name:
+            try:
+                self.client.volumes.get(volume_name).remove(force=True)
+            except docker.errors.NotFound:
+                pass
+            except Exception as e:
+                logger.error("Failed to remove volume %s for task %s: %s", volume_name, self.task_id, e)
 
 
 class SubprocessWorkspace:
-    """Fallback ephemeral workspace for cloud environments without nested Docker daemon (Render, serverless)."""
+    """Fallback workspace for hosts without a Docker daemon (Render, Railway, serverless).
+
+    When the worker runs as root (the default in backend/Dockerfile), every agent command runs as a
+    per-task unprivileged UID with a scrubbed environment, so it cannot read the API's environment
+    variables (/proc/<pid>/environ), other tasks' workspaces, or root-owned files. Token-bearing git
+    operations run as the worker's own user in private directories the agent cannot reach.
+    Without root, commands still get a scrubbed environment but share the worker's UID.
+    """
 
     def __init__(self, task_id: int):
         self.task_id = task_id
-        self.base_dir = f"/tmp/nimbus-workspace-{self.task_id}"
-        self.workdir = os.path.join(self.base_dir, "repo")
+        self.base_dir: Optional[str] = None
+        self.workdir: Optional[str] = None
+        self.base_sha: Optional[str] = None
+        self.sandbox_uid: Optional[int] = (
+            SANDBOX_UID_BASE + (task_id % SANDBOX_UID_RANGE) if os.geteuid() == 0 else None
+        )
+        if self.sandbox_uid is None:
+            logger.warning(
+                "SubprocessWorkspace for task %s is not running as root; agent commands share the "
+                "worker's UID and only get a scrubbed environment.", task_id
+            )
+
+    def _sandbox_env(self) -> dict:
+        return {
+            "PATH": SANDBOX_PATH,
+            "HOME": self.base_dir or self.workdir or "/tmp",
+            "LANG": "C.UTF-8",
+            "TERM": "dumb",
+        }
+
+    def _run(
+        self,
+        command: str,
+        cwd: str,
+        env: dict,
+        timeout: int,
+        as_sandbox: bool
+    ) -> Tuple[int, bytes, bytes]:
+        """Runs bash in its own process group (timeouts kill everything it spawned)."""
+        user_kwargs = {}
+        if as_sandbox and self.sandbox_uid is not None:
+            user_kwargs = dict(user=self.sandbox_uid, group=self.sandbox_uid, extra_groups=[])
+        proc = subprocess.Popen(
+            ["bash", "-c", command],
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            **user_kwargs
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            return proc.returncode, stdout, stderr
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = proc.communicate()
+            return 124, stdout, stderr
+
+    def _run_trusted_git(self, script: str, github_token: Optional[str], timeout: int = 300) -> Tuple[int, str]:
+        """Runs a token-bearing git script as the worker's user in a fresh private directory."""
+        private_dir = tempfile.mkdtemp(prefix="nimbus-git-")
+        try:
+            env = {"PATH": SANDBOX_PATH, "HOME": private_dir, "LANG": "C.UTF-8"}
+            env.update(git_auth_env(github_token))
+            code, out, err = self._run(script, private_dir, env, timeout, as_sandbox=False)
+            output = out.decode("utf-8", errors="replace") + err.decode("utf-8", errors="replace")
+            if code == 124:
+                output += f"\n[Git operation timed out after {timeout} seconds]"
+            return code, output.strip()
+        finally:
+            shutil.rmtree(private_dir, ignore_errors=True)
+
+    def _hand_over_to_sandbox(self):
+        """Gives the per-task UID ownership of its workspace (never following symlinks)."""
+        if self.sandbox_uid is None:
+            return
+        uid = self.sandbox_uid
+        os.lchown(self.base_dir, uid, uid)
+        for root, dirs, files in os.walk(self.base_dir, followlinks=False):
+            for name in dirs + files:
+                os.lchown(os.path.join(root, name), uid, uid)
 
     def setup(
         self,
         repo_url: Optional[str] = None,
         branch_name: Optional[str] = None,
-        github_token: Optional[str] = None
+        github_token: Optional[str] = None,
+        start_point: Optional[str] = None
     ) -> Tuple[int, str]:
-        os.makedirs(self.base_dir, exist_ok=True)
+        check_start_point(start_point)
+        # Unpredictable, atomically created 0700 dir: nothing can pre-plant symlinks in it
+        self.base_dir = tempfile.mkdtemp(prefix=f"nimbus-workspace-{self.task_id}-")
+        self.workdir = os.path.join(self.base_dir, "repo")
         logs = []
 
         if repo_url:
             cleaned_url = repo_url.strip()
-            if os.path.exists(self.workdir):
-                shutil.rmtree(self.workdir, ignore_errors=True)
-                
-            if github_token:
-                parsed = parse_github_repo(cleaned_url)
-                if parsed:
-                    owner, repo = parsed
-                    auth_header = base64.b64encode(f"x-access-token:{github_token}".encode()).decode()
-                    clone_cmd = (
-                        f"git -c http.extraheader='AUTHORIZATION: basic {auth_header}' "
-                        f"clone https://github.com/{shlex.quote(owner)}/{shlex.quote(repo)}.git {shlex.quote(self.workdir)}"
-                    )
-                else:
-                    clone_cmd = f"git clone {shlex.quote(cleaned_url)} {shlex.quote(self.workdir)}"
-            else:
-                clone_cmd = f"git clone {shlex.quote(cleaned_url)} {shlex.quote(self.workdir)}"
-
-            code, out = self.execute_command(clone_cmd, workdir=self.base_dir)
+            code, out = self._run_trusted_git(
+                clone_script(resolve_clone_url(cleaned_url, github_token), self.workdir),
+                github_token
+            )
             if code != 0:
                 return code, f"Failed to clone repository {cleaned_url}: {out}"
+            self.base_sha = start_point or parse_base_sha(out)
+            self._hand_over_to_sandbox()
             logs.append(f"Cloned {cleaned_url}")
 
             if branch_name:
+                start = f" {start_point}" if start_point else ""
                 code_b, out_b = self.execute_command(
-                    f"git checkout -b {shlex.quote(branch_name)}",
+                    f"git checkout -b {shlex.quote(branch_name)}{start}",
                     workdir=self.workdir
                 )
                 if code_b != 0:
@@ -242,6 +652,7 @@ class SubprocessWorkspace:
                 logs.append(f"Created branch {branch_name}")
         else:
             os.makedirs(self.workdir, exist_ok=True)
+            self._hand_over_to_sandbox()
             init_repo = (
                 "git init && "
                 "git config user.name 'Nimbus Agent' && "
@@ -262,19 +673,23 @@ class SubprocessWorkspace:
         target_dir = workdir or self.workdir
         os.makedirs(target_dir, exist_ok=True)
         try:
-            res = subprocess.run(
-                ["bash", "-c", command],
-                cwd=target_dir,
-                capture_output=True,
-                text=True,
-                timeout=timeout
-            )
-            out = (res.stdout or "") + (res.stderr or "")
-            return res.returncode, out.strip()
-        except subprocess.TimeoutExpired:
-            return 124, f"[Command timed out after {timeout} seconds]"
+            code, stdout, stderr = self._run(command, target_dir, self._sandbox_env(), timeout, as_sandbox=True)
         except Exception as e:
             return 1, f"[Execution failed: {e}]"
+        if code == 124:
+            return 124, f"[Command timed out after {timeout} seconds]"
+        out = stdout.decode("utf-8", errors="replace") + stderr.decode("utf-8", errors="replace")
+        return code, out.strip()
+
+    def apply_patch(self, patch: str) -> Tuple[int, str]:
+        """Re-applies a previous run's change (uncommitted), as the sandbox user."""
+        data = patch if patch.endswith("\n") else patch + "\n"
+        patch_path = os.path.join(self.base_dir, PRIOR_PATCH_NAME)  # outside the repo
+        with open(patch_path, "w") as f:
+            f.write(data)
+        if self.sandbox_uid is not None:
+            os.lchown(patch_path, self.sandbox_uid, self.sandbox_uid)
+        return self.execute_command(apply_patch_command(patch_path), workdir=self.workdir)
 
     def get_diff(self) -> str:
         self.execute_command("git add -N .", workdir=self.workdir)
@@ -284,20 +699,15 @@ class SubprocessWorkspace:
         return out.strip()
 
     def get_file_base64(self, file_path: str) -> Optional[str]:
-        """Reads a binary file inside local subprocess workdir and returns its base64 encoded string."""
-        full_path = os.path.join(self.workdir, file_path) if not os.path.isabs(file_path) else file_path
-        if os.path.exists(full_path):
-            try:
-                with open(full_path, "rb") as f:
-                    return base64.b64encode(f.read()).decode("utf-8")
-            except Exception:
-                return None
+        """Reads a file as the sandbox user, so agent-planted symlinks can't expose worker files."""
+        code, out = self.execute_command(f"base64 -w 0 {shlex.quote(file_path)}", workdir=self.workdir)
+        if code == 0 and out.strip():
+            return out.strip()
         return None
 
     def commit_changes(self, message: str = "Nimbus agent automated changes") -> Tuple[int, str]:
-        clean_msg = message.replace("'", "").replace("\n", " ").strip()[:100]
         return self.execute_command(
-            f"git add -A && git commit -m {shlex.quote(clean_msg)} || true",
+            f"git add -A && git commit -m {shlex.quote(clean_commit_message(message))} || true",
             workdir=self.workdir
         )
 
@@ -305,56 +715,99 @@ class SubprocessWorkspace:
         self,
         branch_name: str,
         repo_url: str,
-        github_token: Optional[str] = None
+        github_token: Optional[str] = None,
+        message: str = "Nimbus agent automated changes",
+        author_name: str = "Nimbus Agent",
+        author_email: str = "agent@nimbus.ai",
+        remote_url: Optional[str] = None,
+        push_url: Optional[str] = None,
+        expect_sha: Optional[str] = None
     ) -> Tuple[int, str]:
-        if not github_token:
+        """Replays the agent's changes onto a fresh private clone and pushes that, never the agent's .git."""
+        if not github_token and remote_url is None:
             return 1, "No GitHub token available to push branch."
-
-        parsed = parse_github_repo(repo_url)
-        if not parsed:
+        remote_url = remote_url or github_push_url(repo_url)
+        if not remote_url:
             return 1, f"Could not parse repo from {repo_url}"
+        if not self.base_sha:
+            return 1, "No base commit recorded (empty repository?); cannot push."
 
-        owner, repo = parsed
-        auth_header = base64.b64encode(f"x-access-token:{github_token}".encode()).decode()
-        push_cmd = (
-            f"git -c http.extraheader='AUTHORIZATION: basic {auth_header}' "
-            f"push https://github.com/{shlex.quote(owner)}/{shlex.quote(repo)}.git {shlex.quote(branch_name)}"
-        )
-        return self.execute_command(push_cmd, workdir=self.workdir)
+        try:
+            code, patch, _ = self._run(
+                patch_script(self.base_sha), self.workdir, self._sandbox_env(), 300, as_sandbox=True
+            )
+        except Exception as e:
+            return 1, f"Failed to collect workspace changes for push: {e}"
+        if code != 0:
+            return code, "Failed to collect workspace changes for push."
+        if not patch.strip():
+            return 1, "No changes to push."
+
+        patch_dir = tempfile.mkdtemp(prefix="nimbus-patch-")
+        try:
+            patch_path = os.path.join(patch_dir, "changes.patch")
+            with open(patch_path, "wb") as f:
+                f.write(patch)
+            return self._run_trusted_git(
+                push_script(
+                    remote_url, self.base_sha, branch_name, patch_path, "push",
+                    clean_commit_message(message), author_name, author_email, push_url, expect_sha
+                ),
+                github_token
+            )
+        finally:
+            shutil.rmtree(patch_dir, ignore_errors=True)
 
     def cleanup(self):
-        if os.path.exists(self.base_dir):
+        if self.sandbox_uid is not None:
+            _kill_uid_processes(self.sandbox_uid)
+        if self.base_dir and os.path.exists(self.base_dir):
             try:
                 shutil.rmtree(self.base_dir, ignore_errors=True)
             except Exception as e:
-                print(f"Failed to cleanup temp workspace: {e}")
+                logger.warning("Failed to cleanup temp workspace: %s", e)
+
+
+def _kill_uid_processes(uid: int):
+    """Kills anything the agent left running under its per-task UID (e.g. background jobs)."""
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            if os.stat(f"/proc/{entry}").st_uid == uid:
+                os.kill(int(entry), signal.SIGKILL)
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            pass
 
 
 def create_workspace(task_id: int):
     """Factory that returns DockerWorkspace if Docker daemon is running, else SubprocessWorkspace."""
-    if DOCKER_LIB_INSTALLED:
-        try:
-            client = docker.from_env()
-            client.ping()
-            return DockerWorkspace(task_id=task_id)
-        except Exception:
-            pass
+    client = get_docker_client()
+    if client is not None:
+        return DockerWorkspace(task_id=task_id, client=client)
     return SubprocessWorkspace(task_id=task_id)
 
 
 class UnifiedWorkspace:
     """Unified asynchronous workspace interface wrapping either Docker or Subprocess."""
 
-    def __init__(self, task_id: int):
-        self.impl = create_workspace(task_id)
+    def __init__(self, task_id: int, impl=None):
+        self.impl = impl or create_workspace(task_id)
+
+    @property
+    def base_sha(self) -> Optional[str]:
+        return getattr(self.impl, "base_sha", None)
 
     async def asetup(
         self,
         repo_url: Optional[str] = None,
         branch_name: Optional[str] = None,
-        github_token: Optional[str] = None
+        github_token: Optional[str] = None,
+        start_point: Optional[str] = None
     ) -> Tuple[int, str]:
-        return await asyncio.to_thread(self.impl.setup, repo_url, branch_name, github_token)
+        return await asyncio.to_thread(
+            self.impl.setup, repo_url, branch_name, github_token, start_point=start_point
+        )
 
     async def aexecute_command(
         self,
@@ -377,9 +830,21 @@ class UnifiedWorkspace:
         self,
         branch_name: str,
         repo_url: str,
-        github_token: Optional[str] = None
+        github_token: Optional[str] = None,
+        message: str = "Nimbus agent automated changes",
+        author_name: str = "Nimbus Agent",
+        author_email: str = "agent@nimbus.ai",
+        push_url: Optional[str] = None,
+        expect_sha: Optional[str] = None
     ) -> Tuple[int, str]:
-        return await asyncio.to_thread(self.impl.push_branch, branch_name, repo_url, github_token)
+        return await asyncio.to_thread(
+            self.impl.push_branch, branch_name, repo_url, github_token,
+            message=message, author_name=author_name, author_email=author_email,
+            push_url=push_url, expect_sha=expect_sha
+        )
+
+    async def aapply_patch(self, patch: str) -> Tuple[int, str]:
+        return await asyncio.to_thread(self.impl.apply_patch, patch)
 
     async def acleanup(self):
         await asyncio.to_thread(self.impl.cleanup)

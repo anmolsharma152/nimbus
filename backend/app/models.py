@@ -40,6 +40,7 @@ class User(Base):
     github_token = Column(Text, nullable=True)  # Encrypted at rest
     tier = Column(String, default="free", nullable=False)
     onboarding_completed = Column(Boolean, default=False, nullable=False)
+    model_prefs = Column(Text, nullable=True)  # JSON {provider: model}, see app/model_prefs.py
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -75,13 +76,31 @@ class Task(Base):
     repo_url = Column(String, nullable=True)
     git_branch = Column(String, nullable=True)
     pr_url = Column(String, nullable=True)
-    patch_diff = Column(Text, nullable=True)
+    patch_diff = Column(Text, nullable=True)  # cumulative change since base_sha, across follow-ups
+    base_sha = Column(String(40), nullable=True)  # commit the task's work is built on
+    pushed_sha = Column(String(40), nullable=True)  # last commit Nimbus pushed to git_branch
+    head_repo = Column(String, nullable=True)  # "owner/repo" the branch was pushed to (repo or fork)
     status = Column(Enum(TaskStatus, name="taskstatus"), default=TaskStatus.PENDING, nullable=False)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     user = relationship("User", back_populates="tasks")
     events = relationship("TaskEvent", back_populates="task", cascade="all, delete-orphan")
+    messages = relationship(
+        "TaskMessage", back_populates="task", cascade="all, delete-orphan", order_by="TaskMessage.id"
+    )
+
+
+class TaskMessage(Base):
+    """A follow-up instruction the user sent on an existing task."""
+    __tablename__ = "task_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=utc_now, index=True)
+
+    task = relationship("Task", back_populates="messages")
 
 
 class TaskEvent(Base):

@@ -5,14 +5,22 @@ Tier 2: Groq (openai/gpt-oss-120b) via OpenAI-compatible REST endpoint
 Tier 3: OpenRouter (google/gemma-4-31b-it:free) via OpenAI-compatible REST endpoint
 """
 
-import json
 import asyncio
+import logging
+import time
+from collections import Counter
 from typing import Callable, Coroutine, List, Dict, Any, Optional
 import httpx
 from google import genai
 from google.genai import types
 
-from .settings import settings
+from .settings import settings, secret_value
+
+logger = logging.getLogger(__name__)
+
+
+class TierNotConfigured(ValueError):
+    """A fallback tier has no API key; skipped, not counted as a provider failure."""
 
 
 class LLMChatSession:
@@ -25,14 +33,17 @@ class LLMChatSession:
         max_tokens: int = 4096,
         gemini_api_key: Optional[str] = None,
         groq_api_key: Optional[str] = None,
-        openrouter_api_key: Optional[str] = None
+        openrouter_api_key: Optional[str] = None,
+        gemini_model: Optional[str] = None,
+        groq_model: Optional[str] = None,
+        openrouter_model: Optional[str] = None
     ):
         self.system_instruction = system_instruction
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.gemini_api_key = gemini_api_key or settings.GEMINI_API_KEY
-        self.groq_api_key = groq_api_key or settings.GROQ_API_KEY
-        self.openrouter_api_key = openrouter_api_key or settings.OPENROUTER_API_KEY
+        self.gemini_api_key = gemini_api_key or secret_value(settings.GEMINI_API_KEY)
+        self.groq_api_key = groq_api_key or secret_value(settings.GROQ_API_KEY)
+        self.openrouter_api_key = openrouter_api_key or secret_value(settings.OPENROUTER_API_KEY)
 
         # Unified message history for OpenAI-compatible endpoints: [{"role": "...", "content": "..."}]
         self.messages: List[Dict[str, str]] = [
@@ -42,7 +53,16 @@ class LLMChatSession:
         self._gemini_client: Optional[genai.Client] = None
         self._gemini_chat = None
         self._gemini_models = ["gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.5-flash", "gemini-flash-latest"]
+        if gemini_model:
+            # The user's choice goes first; the rest of the pool stays as fallback
+            self._gemini_models = [gemini_model] + [m for m in self._gemini_models if m != gemini_model]
+        self.groq_model = groq_model or settings.GROQ_MODEL or "openai/gpt-oss-120b"
+        self.openrouter_model = openrouter_model or settings.OPENROUTER_MODEL or "cohere/north-mini-code:free"
         self._current_model_idx = 0
+        # Per-session usage, reported in the worker's task summary log
+        self.tier_calls: Counter = Counter()
+        self.tier_failures: Counter = Counter()
+        self.llm_seconds = 0.0
         self._init_gemini_chat()
 
     def _init_gemini_chat(self, model_override: Optional[str] = None):
@@ -60,14 +80,14 @@ class LLMChatSession:
                     )
                 )
             except Exception as e:
-                print(f"[LLM Router] Failed to initialize Gemini chat: {e}")
+                logger.warning("Failed to initialize Gemini chat: %s", e)
                 self._gemini_client = None
                 self._gemini_chat = None
 
     async def _call_gemini(self, prompt: str) -> str:
         """Tier 1: Google Gemini API with intra-model fallback, lifecycle recovery, and retry."""
         if not settings.GEMINI_API_KEY:
-            raise ValueError("GEMINI_API_KEY is not configured.")
+            raise TierNotConfigured("GEMINI_API_KEY is not configured.")
         
         last_err = None
         for attempt in range(1, 4):
@@ -88,7 +108,7 @@ class LLMChatSession:
                 
                 # If client was closed, recreate chat session immediately
                 if "client has been closed" in err_str:
-                    print(f"[LLM Router] Gemini client connection was closed. Recreating (attempt {attempt}/3)...")
+                    logger.info("Gemini client was closed; recreating (attempt %s/3)", attempt)
                     self._init_gemini_chat()
                     continue
 
@@ -96,7 +116,7 @@ class LLMChatSession:
                 if "429" in err_str or "quota" in err_str or "503" in err_str or "unavailable" in err_str:
                     self._current_model_idx = (self._current_model_idx + 1) % len(self._gemini_models)
                     next_model = self._gemini_models[self._current_model_idx]
-                    print(f"[LLM Router] Gemini model failover ({e}) -> Trying intra-Gemini model '{next_model}' (attempt {attempt}/3)...")
+                    logger.warning("Gemini failover (%s); trying model %s (attempt %s/3)", e, next_model, attempt)
                     self._init_gemini_chat(model_override=next_model)
                     await asyncio.sleep(1.0)
                     continue
@@ -170,7 +190,7 @@ class LLMChatSession:
             )
             if resp.status_code == 413 or (resp.status_code == 400 and "too large" in resp.text.lower()):
                 # Context too large — retry with aggressively truncated history
-                print(f"[LLM Router] {base_url} returned {resp.status_code} (context too large). Retrying with truncated history...")
+                logger.info("%s returned %s (context too large); retrying with truncated history", base_url, resp.status_code)
                 messages_to_send = self._truncated_messages(max_tokens_estimate=3500)
                 payload["messages"] = messages_to_send
                 resp = await client.post(
@@ -191,9 +211,9 @@ class LLMChatSession:
     async def _call_groq(self) -> str:
         """Tier 2: Groq Clean Models (openai/gpt-oss-120b). Sends truncated context to stay within 8k token limit."""
         if not self.groq_api_key:
-            raise ValueError("GROQ_API_KEY is not configured.")
+            raise TierNotConfigured("GROQ_API_KEY is not configured.")
         
-        model = settings.GROQ_MODEL or "openai/gpt-oss-120b"
+        model = self.groq_model
         # Groq free tier: 8000 TPM hard cap. Send truncated history to be safe.
         return await self._call_openai_compatible(
             base_url="https://api.groq.com/openai/v1",
@@ -205,9 +225,9 @@ class LLMChatSession:
     async def _call_openrouter(self) -> str:
         """Tier 3: OpenRouter Free Tier."""
         if not self.openrouter_api_key:
-            raise ValueError("OPENROUTER_API_KEY is not configured.")
+            raise TierNotConfigured("OPENROUTER_API_KEY is not configured.")
         
-        model = settings.OPENROUTER_MODEL or "cohere/north-mini-code:free"
+        model = self.openrouter_model
         headers_extra = {
             "HTTP-Referer": "https://nimbusagent.vercel.app",
             "X-Title": "Nimbus Cloud Agent",
@@ -218,6 +238,20 @@ class LLMChatSession:
             model=model,
             headers_extra=headers_extra
         )
+
+    async def _timed(self, tier: str, call) -> str:
+        start = time.perf_counter()
+        try:
+            result = await call
+            self.tier_calls[tier] += 1
+            return result
+        except TierNotConfigured:
+            raise
+        except Exception:
+            self.tier_failures[tier] += 1
+            raise
+        finally:
+            self.llm_seconds += time.perf_counter() - start
 
     async def send_message(
         self,
@@ -233,7 +267,7 @@ class LLMChatSession:
 
         # --- TIER 1: Google Gemini ---
         try:
-            response_text = await self._call_gemini(prompt)
+            response_text = await self._timed("gemini", self._call_gemini(prompt))
             self.messages.append({"role": "assistant", "content": response_text})
             return response_text
         except Exception as e:
@@ -246,22 +280,22 @@ class LLMChatSession:
 
         # --- TIER 2: Groq (openai/gpt-oss-120b) ---
         try:
-            response_text = await self._call_groq()
+            response_text = await self._timed("groq", self._call_groq())
             self.messages.append({"role": "assistant", "content": response_text})
             return response_text
         except Exception as e:
-            err_msg = f"Tier 2 (Groq: {settings.GROQ_MODEL}) failed: {e}"
+            err_msg = f"Tier 2 (Groq: {self.groq_model}) failed: {e}"
             errors.append(err_msg)
             if on_fallback:
                 await on_fallback(f"⚠️ {err_msg} -> Failing over to Tier 3 (OpenRouter)...")
 
         # --- TIER 3: OpenRouter Free Tier ---
         try:
-            response_text = await self._call_openrouter()
+            response_text = await self._timed("openrouter", self._call_openrouter())
             self.messages.append({"role": "assistant", "content": response_text})
             return response_text
         except Exception as e:
-            err_msg = f"Tier 3 (OpenRouter: {settings.OPENROUTER_MODEL}) failed: {e}"
+            err_msg = f"Tier 3 (OpenRouter: {self.openrouter_model}) failed: {e}"
             errors.append(err_msg)
 
         # All tiers exhausted

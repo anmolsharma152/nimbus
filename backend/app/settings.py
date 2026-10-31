@@ -1,19 +1,28 @@
+import os
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, SecretStr
+
+
+def secret_value(value: SecretStr | str | None) -> str | None:
+    """Unwraps a SecretStr setting; plain strings and None (e.g. test patches) pass through."""
+    if isinstance(value, SecretStr):
+        return value.get_secret_value()
+    return value
 
 
 class Settings(BaseSettings):
     """Application configuration loaded from environment variables."""
 
-    DATABASE_URL: str = Field(
+    DATABASE_URL: SecretStr = Field(
         default="postgresql+asyncpg://nimbus_user:nimbus_password@localhost:5432/nimbus_db",
         description="Async PostgreSQL database connection string."
     )
-    REDIS_URL: str = Field(
+    REDIS_URL: SecretStr = Field(
         default="redis://localhost:6379/0",
         description="Redis connection URL for arq job queue."
     )
-    GEMINI_API_KEY: str | None = Field(
+    GEMINI_API_KEY: SecretStr | None = Field(
         default=None,
         description="Google Gemini API key for Tier 1 primary agent reasoning."
     )
@@ -21,7 +30,7 @@ class Settings(BaseSettings):
         default="gemini-3.6-flash",
         description="Gemini LLM model identifier (Tier 1)."
     )
-    GROQ_API_KEY: str | None = Field(
+    GROQ_API_KEY: SecretStr | None = Field(
         default=None,
         description="Groq API key for Tier 2 secondary agent fallback."
     )
@@ -29,7 +38,7 @@ class Settings(BaseSettings):
         default="openai/gpt-oss-120b",
         description="Groq clean model identifier (Tier 2)."
     )
-    OPENROUTER_API_KEY: str | None = Field(
+    OPENROUTER_API_KEY: SecretStr | None = Field(
         default=None,
         description="OpenRouter API key for Tier 3 tertiary agent fallback."
     )
@@ -37,19 +46,15 @@ class Settings(BaseSettings):
         default="cohere/north-mini-code:free",
         description="OpenRouter free model identifier (Tier 3)."
     )
-    GITHUB_TOKEN: str | None = Field(
-        default=None,
-        description="GitHub personal access token for cloning and PR creation."
-    )
     GITHUB_CLIENT_ID: str | None = Field(
         default=None,
         description="GitHub OAuth App Client ID."
     )
-    GITHUB_CLIENT_SECRET: str | None = Field(
+    GITHUB_CLIENT_SECRET: SecretStr | None = Field(
         default=None,
         description="GitHub OAuth App Client Secret."
     )
-    JWT_SECRET_KEY: str = Field(
+    JWT_SECRET_KEY: SecretStr = Field(
         default="nimbus-super-secure-jwt-key-2026-change-in-prod",
         description="Secret key for signing session JWT tokens."
     )
@@ -65,13 +70,44 @@ class Settings(BaseSettings):
         default="http://localhost:3000",
         description="Frontend web application base URL for OAuth redirects."
     )
+    OAUTH_REDIRECT_BASE_URL: str | None = Field(
+        default=None,
+        description=(
+            "Public origin GitHub redirects back to after sign-in. Set it to the frontend URL when the "
+            "frontend proxies /api (so the session cookie is first-party). Defaults to the API's own origin."
+        )
+    )
+    COOKIE_SECURE: bool | None = Field(
+        default=None,
+        description="Mark auth cookies Secure. Defaults to true when FRONTEND_URL is https."
+    )
     MAX_AGENT_ITERATIONS: int = Field(
         default=20,
         description="Maximum turns allowed for an agent task."
     )
+    WORKSPACE_IMAGE: str = Field(
+        default="nimbus-workspace:latest",
+        description="Agent sandbox image built from backend/Dockerfile.workspace (Docker mode only)."
+    )
+    ANON_TASKS_PER_HOUR: int = Field(
+        default=10,
+        description="Tasks per hour shared by all signed-out visitors (repo tasks always need sign-in)."
+    )
+    TASK_TIMEOUT_SECONDS: float = Field(
+        default=1800,
+        description="Wall-clock limit for one agent task (30 min); the task is failed and its workspace removed."
+    )
     API_INTERNAL_URL: str = Field(
         default="http://localhost:8000",
         description="Base URL for internal WebSocket broadcast gateway."
+    )
+    LOG_LEVEL: str = Field(
+        default="INFO",
+        description="Root log level (DEBUG, INFO, WARNING, ...)."
+    )
+    LOG_FORMAT: str = Field(
+        default="text",
+        description="'json' for one JSON object per line (log platforms), 'text' for local reading."
     )
     DB_ECHO: bool = Field(
         default=False,
@@ -79,9 +115,16 @@ class Settings(BaseSettings):
     )
 
     model_config = SettingsConfigDict(
-        env_file=[".env", "../.env"],
+        # The test suite sets NIMBUS_IGNORE_DOTENV so real credentials never load into tests
+        env_file=None if os.getenv("NIMBUS_IGNORE_DOTENV") else [".env", "../.env"],
         extra="ignore"
     )
 
 
 settings = Settings()
+
+
+def cookie_secure() -> bool:
+    if settings.COOKIE_SECURE is not None:
+        return settings.COOKIE_SECURE
+    return settings.FRONTEND_URL.lower().startswith("https://")

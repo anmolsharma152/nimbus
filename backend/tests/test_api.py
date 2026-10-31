@@ -3,8 +3,8 @@ from unittest.mock import AsyncMock, patch, MagicMock
 import httpx
 from httpx import ASGITransport
 
-from app.main import app, manager
-from app.models import Task, TaskStatus, EventType
+from app.main import app
+from app.models import Task, TaskStatus
 
 
 @pytest.mark.asyncio
@@ -28,9 +28,14 @@ async def test_create_task_endpoint():
             }
             # We override get_db dependency
             from app.db import get_db
+            from app.auth import get_optional_user
+            from app.models import User
             app.dependency_overrides[get_db] = lambda: mock_db
+            # Repo tasks require sign-in
+            app.dependency_overrides[get_optional_user] = lambda: User(id=7, username="dev", tier="free")
 
-            response = await ac.post("/api/tasks", json=payload)
+            with patch("app.main.check_task_submission_limits", new_callable=AsyncMock):
+                response = await ac.post("/api/tasks", json=payload)
             app.dependency_overrides.clear()
 
             assert response.status_code == 200
@@ -100,7 +105,12 @@ async def test_internal_event_broadcast():
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
         payload = {"type": "log", "message": "Test event"}
-        response = await ac.post("/api/internal/tasks/101/events", json=payload)
+        from app.security import internal_api_token
+        response = await ac.post(
+            "/api/internal/tasks/101/events",
+            json=payload,
+            headers={"X-Nimbus-Internal-Token": internal_api_token()}
+        )
         assert response.status_code == 200
         assert response.json() == {"ok": True}
 

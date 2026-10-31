@@ -1,24 +1,32 @@
 import asyncio
 import json
 import datetime
+import logging
+import time
 from typing import Optional
 import httpx
 from arq import create_pool
 from arq.connections import RedisSettings
+from arq.cron import cron
 from sqlalchemy.ext.asyncio import AsyncSession
-from google import genai
-from google.genai import types
 
 from sqlalchemy.future import select
 import shlex
 
 from .db import async_session
-from .models import User, UserCredential, Task, TaskEvent, EventType, TaskStatus
-from .settings import settings
-from .workspace import UnifiedWorkspace
-from .github_client import create_draft_pr
+from .models import User, UserCredential, Task, TaskEvent, TaskMessage, EventType, TaskStatus
+from .settings import settings, secret_value
+from .security import decrypt_secret, internal_api_token
+from .workspace import UnifiedWorkspace, github_push_url, parse_base_sha, get_docker_client, reap_orphaned_containers, reap_orphaned_volumes
+from .github_client import RepoAccess, create_draft_pr, ensure_fork, get_repo_access, parse_github_repo
 from .llm import LLMChatSession
+from .branches import validate_task_branch
+from .model_prefs import parse_model_prefs
+from .agent import SYSTEM_INSTRUCTION, initial_prompt, run_agent_commands
 from .events import event_bus
+from .logging_config import configure_logging, task_id_var
+
+logger = logging.getLogger(__name__)
 
 
 async def log_event(db: AsyncSession, task_id: int, event_type: EventType, payload_dict: dict):
@@ -33,9 +41,9 @@ async def log_event(db: AsyncSession, task_id: int, event_type: EventType, paylo
 
     # 1. Publish to Redis Event Bus (real-time fanout to all API replicas)
     try:
-        await event_bus.publish_event(task_id, ev_type_str, payload_dict, ts_str)
+        await event_bus.publish_event(task_id, ev_type_str, payload_dict, ts_str, event_id=event.id)
     except Exception as e:
-        print(f"Failed to publish to Redis Event Bus: {e}")
+        logger.warning("Failed to publish task event to Redis: %s", e)
 
     # 2. HTTP fallback to internal endpoint
     try:
@@ -44,13 +52,16 @@ async def log_event(db: AsyncSession, task_id: int, event_type: EventType, paylo
             await client.post(
                 f"{api_base.rstrip('/')}/api/internal/tasks/{task_id}/events",
                 json={
+                    "id": event.id,
                     "type": ev_type_str,
                     "payload": json.dumps(payload_dict),
                     "timestamp": ts_str
-                }
+                },
+                headers={"X-Nimbus-Internal-Token": internal_api_token()}
             )
     except Exception as e:
-        pass
+        # Best effort: Redis pub/sub is the primary path to the API
+        logger.debug("Internal event POST failed: %s", e)
 
 
 async def run_agent_loop(
@@ -60,7 +71,145 @@ async def run_agent_loop(
     repo_url: Optional[str] = None,
     git_branch: Optional[str] = None
 ):
-    print(f"Worker picked up task {task_id}: {prompt} (repo: {repo_url}, branch: {git_branch})")
+    """Runs one agent task under the TASK_TIMEOUT_SECONDS wall-clock limit (also used without arq)."""
+    task_token = task_id_var.set(task_id)
+    stats: dict = {"status": "unknown"}
+    start = time.perf_counter()
+    try:
+        await asyncio.wait_for(
+            _execute_agent_task(task_id, prompt, repo_url, git_branch, stats),
+            timeout=settings.TASK_TIMEOUT_SECONDS
+        )
+    except TimeoutError:
+        # The task already marked itself FAILED and removed its workspace while being cancelled
+        stats["reason"] = "time_limit"
+        logger.warning("Task exceeded %ss time limit", settings.TASK_TIMEOUT_SECONDS)
+    finally:
+        _log_task_summary(stats, time.perf_counter() - start)
+        task_id_var.reset(task_token)
+
+
+def _log_task_summary(stats: dict, duration_s: float):
+    """One machine-readable line per task: the source for dashboards and alerting."""
+    llm_session = stats.pop("_llm", None)
+    summary = {
+        "event": "task_finished",
+        "duration_s": round(duration_s, 2),
+        "iterations": stats.get("iterations", 0),
+        "commands": stats.get("commands", 0),
+        "patch_chars": stats.get("patch_chars", 0),
+        "pr_opened": stats.get("pr_opened", False),
+        "reason": stats.get("reason"),
+    }
+    if llm_session is not None:
+        summary["llm_calls"] = dict(llm_session.tier_calls)
+        summary["llm_failures"] = dict(llm_session.tier_failures)
+        summary["llm_seconds"] = round(llm_session.llm_seconds, 2)
+    # `status` is a LogRecord-safe name; keep it last so it reads well in text logs
+    summary["task_status"] = stats.get("status")
+    logger.info("Task finished: %s", summary["task_status"], extra=summary)
+
+
+async def _fail_before_start(db: AsyncSession, task: Task, stats: dict, reason: str, message: str):
+    logger.warning("Refusing task", extra={"event": "task_refused", "reason": reason})
+    stats.update(status="failed", reason=reason)
+    task.status = TaskStatus.FAILED
+    await db.commit()
+    await log_event(db, task.id, EventType.LOG, {"message": message})
+    await log_event(db, task.id, EventType.STATUS, {"status": "failed"})
+
+
+async def _deliver_changes(
+    db: AsyncSession,
+    task: Task,
+    workspace: UnifiedWorkspace,
+    repo_url: str,
+    repo_access: RepoAccess,
+    token: str,
+    branch_name: str,
+    prompt: str,
+    diff_text: str,
+    author_name: str,
+    author_email: str,
+    author_tag: str,
+    stats: dict,
+):
+    """Pushes the task branch (to a fork when the user cannot push upstream) and opens a draft PR
+    against the repo's default branch. Follow-ups update the same branch and PR."""
+    task_id = task.id
+    push_url = None
+    head_owner = None
+    fork_name = None
+    if task.head_repo:
+        # Follow-up: keep using wherever the branch already lives
+        if task.head_repo.lower() != repo_access.full_name.lower():
+            fork_name = task.head_repo
+            push_url = github_push_url(fork_name)
+            head_owner = fork_name.split("/", 1)[0]
+    elif not repo_access.can_push:
+        await log_event(db, task_id, EventType.LOG, {"message": f"Forking {repo_access.full_name} to your account..."})
+        fork_name, fork_error = await ensure_fork(repo_access, token)
+        if fork_error:
+            await log_event(db, task_id, EventType.LOG, {"message": f"Could not push changes: {fork_error}"})
+            return
+        push_url = github_push_url(fork_name)
+        head_owner = fork_name.split("/", 1)[0]
+
+    target = fork_name or repo_access.full_name
+    await log_event(db, task_id, EventType.LOG, {"message": f"Pushing branch '{branch_name}' to {target}..."})
+    push_code, push_out = await workspace.apush_branch(
+        branch_name, repo_url, token,
+        message=f"Nimbus: {prompt[:60]}",
+        author_name=author_name,
+        author_email=author_email,
+        push_url=push_url,
+        expect_sha=task.pushed_sha,
+    )
+    if push_code != 0:
+        hint = (
+            " The branch changed since Nimbus last pushed it, so it was left as is."
+            if task.pushed_sha and "stale info" in (push_out or "") else ""
+        )
+        await log_event(db, task_id, EventType.LOG, {"message": f"Failed to push branch: {push_out}{hint}"})
+        return
+    task.pushed_sha = parse_base_sha(push_out or "") or task.pushed_sha
+    task.head_repo = target
+    await db.commit()
+
+    if task.pr_url:
+        await log_event(db, task_id, EventType.LOG, {"message": f"Updated draft PR: {task.pr_url}"})
+        return
+
+    pr_url = await create_draft_pr(
+        repo_url=repo_url,
+        title=f"Nimbus Agent: {prompt[:60]}",
+        body=f"### Automated Pull Request by Nimbus\n\n**Task #{task_id}**\n**Author:** {author_tag}\n\n**Prompt:**\n{prompt}\n\n### Changes Generated:\n```diff\n{diff_text[:3000]}\n```",
+        head_branch=branch_name,
+        base_branch=repo_access.default_branch,
+        token=token,
+        head_owner=head_owner,
+    )
+    if pr_url:
+        task.pr_url = pr_url
+        stats["pr_opened"] = True
+        await log_event(db, task_id, EventType.LOG, {"message": f"Draft PR opened successfully: {pr_url}"})
+    else:
+        await log_event(db, task_id, EventType.LOG, {"message": "Branch pushed, but Draft PR creation failed."})
+
+
+async def _execute_agent_task(
+    task_id: int,
+    prompt: str,
+    repo_url: Optional[str] = None,
+    git_branch: Optional[str] = None,
+    stats: Optional[dict] = None
+):
+    stats = stats if stats is not None else {}
+    # Prompt length only: task prompts can contain private details
+    logger.info(
+        "Worker picked up task",
+        extra={"event": "task_started", "repo_url": repo_url, "branch": git_branch, "prompt_chars": len(prompt)}
+    )
     
     branch_name = git_branch or f"nimbus/task-{task_id}"
     workspace = UnifiedWorkspace(task_id=task_id)
@@ -68,6 +217,7 @@ async def run_agent_loop(
     async with async_session() as db:
         task = await db.get(Task, task_id)
         if not task:
+            stats["status"] = "missing"
             return
 
         # Look up user details and decrypt vault credentials
@@ -79,9 +229,11 @@ async def run_agent_loop(
         git_user_name = "Nimbus Agent"
         git_user_email = "agent@nimbus.ai"
 
+        model_prefs = {}
         if task.user_id:
             user = await db.get(User, task.user_id)
             if user:
+                model_prefs = parse_model_prefs(getattr(user, "model_prefs", None))
                 git_user_name = user.display_name or user.username
                 git_user_email = user.email or f"{user.username}@users.noreply.github.com"
                 if user.github_token:
@@ -101,25 +253,53 @@ async def run_agent_loop(
                     elif c.provider == "openrouter" and decrypted:
                         user_openrouter_key = decrypted
 
-        final_github_token = user_github_token or settings.GITHUB_TOKEN
+        # Only the task owner's own GitHub credentials are ever used; there is no server-token fallback
+        final_github_token = user_github_token
+
+        # Re-checked here for tasks queued before the API enforced these rules
+        refusal = None
+        if repo_url and user is None:
+            refusal = ("anonymous_repo_task", "Sign in with GitHub to run tasks against a repository.")
+        else:
+            try:
+                branch_name = validate_task_branch(git_branch) or branch_name
+            except ValueError as e:
+                refusal = ("invalid_branch", str(e))
+        if refusal:
+            await _fail_before_start(db, task, stats, *refusal)
+            return
+
         has_any_llm_key = bool(
             user_gemini_key or user_groq_key or user_openrouter_key or
             settings.GEMINI_API_KEY or settings.GROQ_API_KEY or settings.OPENROUTER_API_KEY
         )
-
         if not has_any_llm_key:
-            print("No LLM API keys configured (user BYOK or server environment). Aborting.")
-            task.status = TaskStatus.FAILED
-            await db.commit()
-            await log_event(
-                db,
-                task_id,
-                EventType.LOG,
-                {"message": "No LLM API keys configured. Please configure an API key in Settings or environment."}
+            await _fail_before_start(
+                db, task, stats, "no_llm_key",
+                "No LLM API keys configured. Please configure an API key in Settings or environment."
             )
-            await log_event(db, task_id, EventType.STATUS, {"status": "failed"})
             return
-        
+
+        # Check access as the task owner before spending a sandbox and LLM calls on the task
+        repo_access = None
+        if repo_url and parse_github_repo(repo_url):
+            repo_access, access_error = await get_repo_access(repo_url, final_github_token)
+            if access_error:
+                await _fail_before_start(db, task, stats, "repo_access", access_error)
+                return
+            if final_github_token and not repo_access.can_push and not repo_access.allow_forking:
+                await _fail_before_start(
+                    db, task, stats, "repo_access",
+                    f"You have no write access to {repo_access.full_name} and it does not allow forking, "
+                    "so Nimbus could not deliver the changes."
+                )
+                return
+
+        follow_ups_res = await db.execute(
+            select(TaskMessage.content).where(TaskMessage.task_id == task_id).order_by(TaskMessage.id)
+        )
+        follow_ups = [m for m in follow_ups_res.scalars().all() if isinstance(m, str)]
+
         task.status = TaskStatus.RUNNING
         task.git_branch = branch_name
         await db.commit()
@@ -130,15 +310,38 @@ async def run_agent_loop(
             EventType.LOG,
             {"message": f"Agent initialized for @{git_user_name}. Provisioning isolated workspace on branch '{branch_name}'..."}
         )
+        if repo_access and final_github_token and not repo_access.can_push:
+            await log_event(db, task_id, EventType.LOG, {
+                "message": f"You have no write access to {repo_access.full_name}; changes will be pushed to "
+                           "a fork under your account and proposed as a pull request."
+            })
 
         try:
-            _, setup_out = await workspace.asetup(
+            # A follow-up rebuilds the task's state: same base commit plus its changes so far
+            prior_patch = task.patch_diff
+            setup_code, setup_out = await workspace.asetup(
                 repo_url=repo_url,
                 branch_name=branch_name,
-                github_token=final_github_token
+                github_token=final_github_token,
+                start_point=task.base_sha if (repo_url and prior_patch) else None
             )
+            if setup_code != 0:
+                raise RuntimeError(f"Workspace setup failed: {setup_out}")
             if setup_out:
                 await log_event(db, task_id, EventType.LOG, {"message": setup_out})
+            if repo_url and workspace.base_sha:
+                task.base_sha = workspace.base_sha
+                await db.commit()
+
+            continuing = None
+            if prior_patch:
+                apply_code, apply_out = await workspace.aapply_patch(prior_patch)
+                continuing = apply_code == 0
+                await log_event(db, task_id, EventType.LOG, {"message": (
+                    "Restored the task's changes so far; continuing from there."
+                    if continuing else
+                    f"Could not restore the task's earlier changes ({apply_out[:300]}); starting from a clean checkout."
+                )})
 
             # Configure user author identity inside the sandbox
             await workspace.aexecute_command(f"git config user.name {shlex.quote(git_user_name)}")
@@ -151,109 +354,44 @@ async def run_agent_loop(
                 {"message": f"Docker workspace ready in /workspace/repo (Author: {git_user_name} <{git_user_email}>). Starting 3-tier LLM reasoning loop..."}
             )
 
-            system_instruction = (
-                "You are Nimbus, an autonomous cloud software engineer. You operate inside an isolated Linux workspace "
-                "with git, python3, and standard tools pre-installed. The current working directory is /workspace/repo.\n\n"
-                "Your objective is to inspect the codebase, make real code modifications on disk, run tests to verify your fix, "
-                "and ensure the repository is left in a clean, working state with passing assertions.\n\n"
-                "To execute a bash command (e.g. to inspect files, write code via `cat << 'EOF' > file.py`, run tests, or view git diff), "
-                "output a JSON block strictly formatted as:\n"
-                "```json\n{\n  \"command\": \"<your bash command here>\",\n  \"screenshot\": \"<optional relative path to generated .png file>\",\n  \"caption\": \"<optional screenshot caption>\"\n}\n```\n\n"
-                "CRITICAL Rules:\n"
-                "1. You MUST execute bash commands to write your actual code and test files to disk (e.g. using `cat << 'EOF' > ...` or python). Do NOT just describe code in text.\n"
-                "2. Directly inspect relevant source files with `find`, `grep`, or `cat`.\n"
-                "3. Do NOT run heavy full-stack package installations (`pip install -r requirements.txt`). Instead, write focused tests using standard library unittest, pytest, or mocks (`unittest.mock`).\n"
-                "4. Visual Verification: If your task touches UI, HTML, CSS, or rendering, you may generate image snapshots (e.g. via python Pillow/matplotlib/playwright) and include `\"screenshot\": \"preview.png\"` in your JSON.\n"
-                "5. Run `git diff` to verify that your changes are written to disk.\n"
-                "6. ONLY after your code changes are written and verified with git diff, summarize your completed work in markdown without emitting further JSON command blocks."
-            )
-
             llm_session = LLMChatSession(
-                system_instruction=system_instruction,
+                system_instruction=SYSTEM_INSTRUCTION,
                 temperature=0.1,
                 gemini_api_key=user_gemini_key,
                 groq_api_key=user_groq_key,
-                openrouter_api_key=user_openrouter_key
+                openrouter_api_key=user_openrouter_key,
+                gemini_model=model_prefs.get("gemini"),
+                groq_model=model_prefs.get("groq"),
+                openrouter_model=model_prefs.get("openrouter"),
             )
+            stats["_llm"] = llm_session
 
-            # Agent Loop
-            current_prompt = (
-                f"Task Goal:\n{prompt}\n\n"
-                f"Repository: {repo_url or 'Local workspace repository'}\n"
-                f"Active Branch: {branch_name}\n"
-                "Begin by listing files or inspecting the project structure."
-            )
-            max_iterations = settings.MAX_AGENT_ITERATIONS
-            STALL_TIMEOUT_SECONDS = 300  # 5 minutes — if LLM doesn't respond, fail cleanly
+            async def emit(event_type: EventType, payload: dict):
+                await log_event(db, task_id, event_type, payload)
 
-            for iteration in range(max_iterations):
-                # Check for cancellation before turn
+            async def cancelled_by_user() -> bool:
                 await db.refresh(task)
-                if task.status == TaskStatus.CANCELLED:
-                    await log_event(db, task_id, EventType.LOG, {"message": "Task execution cancelled by user."})
-                    return
+                return task.status == TaskStatus.CANCELLED
 
-                async def handle_fallback_notice(msg: str):
-                    await log_event(db, task_id, EventType.LOG, {"message": msg})
-
-                try:
-                    text = await asyncio.wait_for(
-                        llm_session.send_message(current_prompt, on_fallback=handle_fallback_notice),
-                        timeout=STALL_TIMEOUT_SECONDS
-                    )
-                except asyncio.TimeoutError:
-                    timeout_msg = (
-                        f"Agent timed out: No LLM response received within {STALL_TIMEOUT_SECONDS // 60} minutes. "
-                        "All providers may be overloaded or rate-limited. Please retry the task later."
-                    )
-                    await log_event(db, task_id, EventType.LOG, {"message": timeout_msg})
-                    raise RuntimeError(timeout_msg)
-
-                # Check if LLM emitted a command block
-                if "```json" in text and "\"command\":" in text:
-                    try:
-                        json_str = text.split("```json")[1].split("```")[0].strip()
-                        cmd_obj = json.loads(json_str)
-                        command = cmd_obj.get("command", "")
-                        screenshot_file = cmd_obj.get("screenshot")
-                        screenshot_caption = cmd_obj.get("caption") or f"Visual snapshot of {screenshot_file}"
-                        
-                        await log_event(db, task_id, EventType.COMMAND, {"command": command})
-                        
-                        # Execute in workspace asynchronously
-                        exit_code, output = await workspace.aexecute_command(command)
-                        
-                        # Capture visual screenshot artifact if requested
-                        if screenshot_file:
-                            b64_img = await workspace.aget_file_base64(screenshot_file)
-                            if b64_img:
-                                await log_event(db, task_id, EventType.RESULT, {
-                                    "screenshot": f"data:image/png;base64,{b64_img}",
-                                    "filename": screenshot_file.split("/")[-1],
-                                    "caption": screenshot_caption
-                                })
-                        
-                        # Limit output length to prevent context explosion
-                        if len(output) > 10000:
-                            output = output[:10000] + "\n...[output truncated for length]"
-                            
-                        result_str = f"[Exit code: {exit_code}]\n{output}"
-                        await log_event(db, task_id, EventType.RESULT, {"output": result_str})
-                        
-                        current_prompt = f"Command output:\n{result_str}"
-                    except Exception as e:
-                        error_msg = f"Failed to parse or execute command: {e}"
-                        await log_event(db, task_id, EventType.RESULT, {"output": error_msg})
-                        current_prompt = f"Error: {error_msg}. Please check your JSON format and try again."
-                else:
-                    # Final summary output
-                    await log_event(db, task_id, EventType.LOG, {"message": f"Agent completed: {text}"})
-                    break
+            outcome = await run_agent_commands(
+                llm_session,
+                workspace,
+                initial_prompt(prompt, repo_url, branch_name, follow_ups=follow_ups, continuing=continuing),
+                emit,
+                max_iterations=settings.MAX_AGENT_ITERATIONS,
+                stats=stats,
+                should_stop=cancelled_by_user,
+            )
+            if outcome == "cancelled":
+                stats["status"] = "cancelled"
+                await log_event(db, task_id, EventType.LOG, {"message": "Task execution cancelled by user."})
+                return
             
             # Post-execution: capture diff and create PR / commit
             diff_text = await workspace.aget_diff()
             if diff_text:
                 task.patch_diff = diff_text
+                stats["patch_chars"] = len(diff_text)
                 await log_event(
                     db,
                     task_id,
@@ -262,39 +400,39 @@ async def run_agent_loop(
                 )
                 await workspace.acommit_changes(f"Nimbus: {prompt[:60]}")
                 
-                # Push branch and open Draft PR if repo_url and token exist
-                if repo_url and final_github_token:
-                    await log_event(db, task_id, EventType.LOG, {"message": f"Pushing branch '{branch_name}' to GitHub..."})
-                    push_code, push_out = await workspace.apush_branch(branch_name, repo_url, final_github_token)
-                    if push_code == 0:
-                        author_tag = f"@{user.username}" if user else "Nimbus Agent"
-                        pr_url = await create_draft_pr(
-                            repo_url=repo_url,
-                            title=f"Nimbus Agent: {prompt[:60]}",
-                            body=f"### Automated Pull Request by Nimbus\n\n**Task #{task_id}**\n**Author:** {author_tag}\n\n**Prompt:**\n{prompt}\n\n### Changes Generated:\n```diff\n{diff_text[:3000]}\n```",
-                            head_branch=branch_name,
-                            token=final_github_token
-                        )
-                        if pr_url:
-                            task.pr_url = pr_url
-                            await log_event(db, task_id, EventType.LOG, {"message": f"Draft PR opened successfully: {pr_url}"})
-                        else:
-                            await log_event(db, task_id, EventType.LOG, {"message": "Branch pushed, but Draft PR creation failed."})
-                    else:
-                        await log_event(db, task_id, EventType.LOG, {"message": f"Failed to push branch: {push_out}"})
+                if repo_access and final_github_token:
+                    await _deliver_changes(
+                        db, task, workspace, repo_url, repo_access, final_github_token, branch_name,
+                        prompt, diff_text, git_user_name, git_user_email,
+                        author_tag=f"@{user.username}" if user else "Nimbus Agent", stats=stats,
+                    )
 
             task.status = TaskStatus.COMPLETED
             await db.commit()
+            stats["status"] = "completed"
             await log_event(db, task_id, EventType.STATUS, {"status": "completed"})
 
         except Exception as e:
-            print(f"Error in agent loop: {e}")
+            logger.exception("Agent loop failed")
+            stats.update(status="failed", reason=type(e).__name__)
             await log_event(db, task_id, EventType.LOG, {"message": f"Agent failed with exception: {e}"})
             task.status = TaskStatus.FAILED
             await db.commit()
             await log_event(db, task_id, EventType.STATUS, {"status": "failed"})
+        except asyncio.CancelledError:
+            # Time limit, arq job timeout, or worker shutdown: never leave the task stuck in RUNNING
+            stats.update(status="failed", reason=stats.get("reason") or "interrupted")
+            limit_min = round(settings.TASK_TIMEOUT_SECONDS / 60)
+            await log_event(db, task_id, EventType.LOG, {
+                "message": f"Agent stopped before finishing: task time limit ({limit_min} min) reached or worker shut down."
+            })
+            task.status = TaskStatus.FAILED
+            await db.commit()
+            await log_event(db, task_id, EventType.STATUS, {"status": "failed"})
+            raise
         finally:
-            await workspace.acleanup()
+            # Shielded so a second cancellation can't abort container removal midway
+            await asyncio.shield(workspace.acleanup())
 
 def normalize_redis_url(url: Optional[str]) -> str:
     """Sanitizes and normalizes Redis connection strings (handles quotes, cli snippets, empty strings)."""
@@ -318,7 +456,7 @@ def normalize_redis_url(url: Optional[str]) -> str:
 
 
 # Setup arq settings with sanitized Redis URL
-redis_settings = RedisSettings.from_dsn(normalize_redis_url(settings.REDIS_URL))
+redis_settings = RedisSettings.from_dsn(normalize_redis_url(secret_value(settings.REDIS_URL)))
 
 async def enqueue_task(
     task_id: int,
@@ -332,14 +470,40 @@ async def enqueue_task(
         await pool.enqueue_job('run_agent_loop', task_id, prompt, repo_url, git_branch)
         await pool.close()
         enqueued = True
-        print(f"Task {task_id} enqueued to Redis queue.")
+        logger.info("Task %s enqueued to Redis queue", task_id)
     except Exception as e:
-        print(f"Redis queue unavailable ({e}). Spawning in-process background worker task.")
+        logger.warning("Redis queue unavailable (%s); running task %s in-process", e, task_id)
     
     if not enqueued:
         # Launch agent loop directly in async event loop background task
         asyncio.create_task(run_agent_loop(None, task_id, prompt, repo_url, git_branch))
 
+async def reap_orphaned_workspaces(ctx):
+    """Removes task containers that outlived the task time limit (e.g. after a worker crash)."""
+    client = get_docker_client()
+    if client is None:
+        return 0
+    max_age = settings.TASK_TIMEOUT_SECONDS + 600
+    removed = await asyncio.to_thread(reap_orphaned_containers, client, max_age)
+    # Volumes after containers: a volume still attached to a container can't be removed
+    removed += await asyncio.to_thread(reap_orphaned_volumes, client, max_age)
+    if removed:
+        logger.info("Reaped %s orphaned workspace container(s)/volume(s)", removed)
+    return removed
+
+
+async def worker_startup(ctx):
+    configure_logging()
+
+
 class WorkerSettings:
     functions = [run_agent_loop]
+    on_startup = worker_startup
     redis_settings = redis_settings
+    # Backstop only: run_agent_loop enforces TASK_TIMEOUT_SECONDS itself and fails the task cleanly
+    job_timeout = settings.TASK_TIMEOUT_SECONDS + 120
+    # A cancelled agent run is marked FAILED; re-running it from scratch is the user's call (Retry button)
+    max_tries = 1
+    cron_jobs = [
+        cron(reap_orphaned_workspaces, minute=set(range(0, 60, 10)), run_at_startup=True)
+    ]

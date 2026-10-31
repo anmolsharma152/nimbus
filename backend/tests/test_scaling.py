@@ -1,12 +1,8 @@
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
-import httpx
+from unittest.mock import AsyncMock, MagicMock
 from fastapi import HTTPException
-from httpx import ASGITransport
 
-from app.main import app
-from app.models import User, Task, TaskEvent, TaskStatus, EventType
-from app.security import create_access_token
+from app.models import User
 from app.ratelimit import check_task_submission_limits
 from app.events import RedisEventBus
 
