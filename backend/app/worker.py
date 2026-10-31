@@ -21,6 +21,7 @@ from .workspace import UnifiedWorkspace, github_push_url, parse_base_sha, get_do
 from .github_client import RepoAccess, create_draft_pr, ensure_fork, get_repo_access, parse_github_repo
 from .llm import LLMChatSession
 from .branches import validate_task_branch
+from .model_prefs import parse_model_prefs
 from .agent import SYSTEM_INSTRUCTION, initial_prompt, run_agent_commands
 from .events import event_bus
 from .logging_config import configure_logging, task_id_var
@@ -228,9 +229,11 @@ async def _execute_agent_task(
         git_user_name = "Nimbus Agent"
         git_user_email = "agent@nimbus.ai"
 
+        model_prefs = {}
         if task.user_id:
             user = await db.get(User, task.user_id)
             if user:
+                model_prefs = parse_model_prefs(getattr(user, "model_prefs", None))
                 git_user_name = user.display_name or user.username
                 git_user_email = user.email or f"{user.username}@users.noreply.github.com"
                 if user.github_token:
@@ -356,7 +359,10 @@ async def _execute_agent_task(
                 temperature=0.1,
                 gemini_api_key=user_gemini_key,
                 groq_api_key=user_groq_key,
-                openrouter_api_key=user_openrouter_key
+                openrouter_api_key=user_openrouter_key,
+                gemini_model=model_prefs.get("gemini"),
+                groq_model=model_prefs.get("groq"),
+                openrouter_model=model_prefs.get("openrouter"),
             )
             stats["_llm"] = llm_session
 

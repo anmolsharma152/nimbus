@@ -21,6 +21,7 @@ from .models import User, Task, TaskEvent, TaskMessage, TaskStatus, EventType
 from .worker import enqueue_task
 from .auth import router as auth_router, get_optional_user, decode_access_token
 from .credentials import router as credentials_router, user_router
+from .model_prefs import router as model_prefs_router
 from .security import (
     decrypt_secret,
     verify_internal_api_token,
@@ -57,6 +58,7 @@ async def lifespan(app: FastAPI):
                     await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS base_sha VARCHAR(40);"))
                     await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS pushed_sha VARCHAR(40);"))
                     await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS head_repo VARCHAR;"))
+                    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS model_prefs TEXT;"))
                 except Exception as alter_err:
                     logger.warning("Column migration check failed: %s", alter_err)
     except Exception as e:
@@ -79,6 +81,7 @@ app = FastAPI(title="Nimbus Control Plane", lifespan=lifespan)
 app.include_router(auth_router)
 app.include_router(credentials_router)
 app.include_router(user_router)
+app.include_router(model_prefs_router)
 
 app.add_middleware(
     CORSMiddleware,

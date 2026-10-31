@@ -5,15 +5,12 @@ import styles from "./SettingsModal.module.css";
 import { useAuth } from "../context/AuthContext";
 import { API_BASE } from "@/lib/api";
 
-// Model preferences live in this browser only; this modal is their only writer
-function storedModel(key: string, fallback: string): string {
-  if (typeof window === "undefined") return fallback;
-  try {
-    return localStorage.getItem(key) || fallback;
-  } catch {
-    return fallback;
-  }
-}
+// Server defaults, shown until the user's saved choices load (see backend app/model_prefs.py)
+const DEFAULT_MODELS = {
+  gemini: "gemini-3.6-flash",
+  groq: "openai/gpt-oss-120b",
+  openrouter: "cohere/north-mini-code:free",
+};
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -23,13 +20,12 @@ interface SettingsModalProps {
 export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const { user, isAuthenticated } = useAuth();
   const [geminiKey, setGeminiKey] = useState("");
-  const [geminiModel, setGeminiModel] = useState(() => storedModel("nimbus_gemini_model", "gemini-3.6-flash"));
+  const [geminiModel, setGeminiModel] = useState(DEFAULT_MODELS.gemini);
   const [groqKey, setGroqKey] = useState("");
-  const [groqModel, setGroqModel] = useState(() => storedModel("nimbus_groq_model", "openai/gpt-oss-120b"));
+  const [groqModel, setGroqModel] = useState(DEFAULT_MODELS.groq);
   const [openrouterKey, setOpenrouterKey] = useState("");
-  const [openrouterModel, setOpenrouterModel] = useState(() =>
-    storedModel("nimbus_openrouter_model", "cohere/north-mini-code:free")
-  );
+  const [openrouterModel, setOpenrouterModel] = useState(DEFAULT_MODELS.openrouter);
+  const [saveError, setSaveError] = useState<string | null>(null);
   
   const [configuredProviders, setConfiguredProviders] = useState<{ [key: string]: boolean }>({});
   const [isSaving, setIsSaving] = useState(false);
@@ -54,6 +50,17 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           }
         })
         .catch((err) => console.warn("Failed to fetch vault credentials:", err));
+
+      // Model choices are stored per account and used by the worker for this user's tasks
+      fetch(`${apiBase}/api/settings/models`, { credentials: "include" })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((prefs) => {
+          if (!prefs) return;
+          setGeminiModel(prefs.gemini || DEFAULT_MODELS.gemini);
+          setGroqModel(prefs.groq || DEFAULT_MODELS.groq);
+          setOpenrouterModel(prefs.openrouter || DEFAULT_MODELS.openrouter);
+        })
+        .catch((err) => console.warn("Failed to fetch model preferences:", err));
     }
   }, [isOpen, isAuthenticated, apiBase]);
 
@@ -62,17 +69,19 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSaving(true);
+    setSaveError(null);
 
     try {
-      if (typeof window !== "undefined") {
-        localStorage.setItem("nimbus_gemini_model", geminiModel);
-        localStorage.setItem("nimbus_groq_model", groqModel);
-        localStorage.setItem("nimbus_openrouter_model", openrouterModel);
-      }
-
-      // If user is logged in, sync non-empty keys to backend encrypted vault
+      // Signed out, nothing can be saved: keys and model choices belong to an account
       if (isAuthenticated) {
-        const promises = [];
+        const promises = [
+          fetch(`${apiBase}/api/settings/models`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ gemini: geminiModel, groq: groqModel, openrouter: openrouterModel }),
+          }),
+        ];
         if (geminiKey.trim()) {
           promises.push(
             fetch(`${apiBase}/api/settings/credentials/gemini`, {
@@ -103,7 +112,11 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             })
           );
         }
-        await Promise.all(promises);
+        const results = await Promise.all(promises);
+        if (results.some((r) => !r.ok)) {
+          setSaveError("Some settings could not be saved. Please try again.");
+          return;
+        }
       }
 
       setSavedSuccess(true);
@@ -113,6 +126,7 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       }, 1200);
     } catch (err) {
       console.error("Failed to save credentials:", err);
+      setSaveError("Could not reach the server. Please try again.");
     } finally {
       setIsSaving(false);
     }
@@ -150,7 +164,7 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             </div>
             <div className={styles.inputGroup}>
               <label>Model Architecture</label>
-              <select value={geminiModel} onChange={(e) => setGeminiModel(e.target.value)}>
+              <select value={geminiModel} onChange={(e) => setGeminiModel(e.target.value)} disabled={!isAuthenticated}>
                 <option value="gemini-3.6-flash">gemini-3.6-flash (Fast &amp; High Velocity)</option>
                 <option value="gemini-3.7-flash">gemini-3.7-flash (Latest Preview)</option>
                 <option value="gemini-3.5-flash">gemini-3.5-flash (Secondary Fallback)</option>
@@ -175,7 +189,7 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             </div>
             <div className={styles.inputGroup}>
               <label>Groq Model</label>
-              <select value={groqModel} onChange={(e) => setGroqModel(e.target.value)}>
+              <select value={groqModel} onChange={(e) => setGroqModel(e.target.value)} disabled={!isAuthenticated}>
                 <option value="openai/gpt-oss-120b">openai/gpt-oss-120b (High Comprehension)</option>
                 <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile (Meta Open Weights)</option>
                 <option value="qwen/qwen3.6-27b">qwen/qwen3.6-27b</option>
@@ -200,19 +214,25 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             </div>
             <div className={styles.inputGroup}>
               <label>OpenRouter Model</label>
-              <select value={openrouterModel} onChange={(e) => setOpenrouterModel(e.target.value)}>
+              <select value={openrouterModel} onChange={(e) => setOpenrouterModel(e.target.value)} disabled={!isAuthenticated}>
                 <option value="cohere/north-mini-code:free">cohere/north-mini-code:free</option>
                 <option value="google/gemma-4-31b-it:free">google/gemma-4-31b-it:free</option>
               </select>
             </div>
           </div>
 
+          {!isAuthenticated && (
+            <p className={styles.errorMsg}>Sign in with GitHub to save API keys and model choices to your account.</p>
+          )}
           <div className={styles.actions}>
             {savedSuccess && (
-              <span className={styles.successMsg}>✓ Configuration saved to browser storage!</span>
+              <span className={styles.successMsg}>✓ Saved to your account</span>
             )}
-            <button type="submit" className={styles.saveBtn}>
-              Save Configuration
+            {saveError && (
+              <span className={styles.errorMsg} role="alert">{saveError}</span>
+            )}
+            <button type="submit" className={styles.saveBtn} disabled={isSaving || !isAuthenticated}>
+              {isSaving ? "Saving..." : "Save Configuration"}
             </button>
           </div>
         </form>

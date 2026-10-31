@@ -40,6 +40,7 @@ class User(Base):
     github_token = Column(Text, nullable=True)  # Encrypted at rest
     tier = Column(String, default="free", nullable=False)
     onboarding_completed = Column(Boolean, default=False, nullable=False)
+    model_prefs = Column(Text, nullable=True)  # JSON {provider: model}, see app/model_prefs.py
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 

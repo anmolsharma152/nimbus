@@ -33,7 +33,10 @@ class LLMChatSession:
         max_tokens: int = 4096,
         gemini_api_key: Optional[str] = None,
         groq_api_key: Optional[str] = None,
-        openrouter_api_key: Optional[str] = None
+        openrouter_api_key: Optional[str] = None,
+        gemini_model: Optional[str] = None,
+        groq_model: Optional[str] = None,
+        openrouter_model: Optional[str] = None
     ):
         self.system_instruction = system_instruction
         self.temperature = temperature
@@ -50,6 +53,11 @@ class LLMChatSession:
         self._gemini_client: Optional[genai.Client] = None
         self._gemini_chat = None
         self._gemini_models = ["gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.5-flash", "gemini-flash-latest"]
+        if gemini_model:
+            # The user's choice goes first; the rest of the pool stays as fallback
+            self._gemini_models = [gemini_model] + [m for m in self._gemini_models if m != gemini_model]
+        self.groq_model = groq_model or settings.GROQ_MODEL or "openai/gpt-oss-120b"
+        self.openrouter_model = openrouter_model or settings.OPENROUTER_MODEL or "cohere/north-mini-code:free"
         self._current_model_idx = 0
         # Per-session usage, reported in the worker's task summary log
         self.tier_calls: Counter = Counter()
@@ -205,7 +213,7 @@ class LLMChatSession:
         if not self.groq_api_key:
             raise TierNotConfigured("GROQ_API_KEY is not configured.")
         
-        model = settings.GROQ_MODEL or "openai/gpt-oss-120b"
+        model = self.groq_model
         # Groq free tier: 8000 TPM hard cap. Send truncated history to be safe.
         return await self._call_openai_compatible(
             base_url="https://api.groq.com/openai/v1",
@@ -219,7 +227,7 @@ class LLMChatSession:
         if not self.openrouter_api_key:
             raise TierNotConfigured("OPENROUTER_API_KEY is not configured.")
         
-        model = settings.OPENROUTER_MODEL or "cohere/north-mini-code:free"
+        model = self.openrouter_model
         headers_extra = {
             "HTTP-Referer": "https://nimbusagent.vercel.app",
             "X-Title": "Nimbus Cloud Agent",
@@ -276,7 +284,7 @@ class LLMChatSession:
             self.messages.append({"role": "assistant", "content": response_text})
             return response_text
         except Exception as e:
-            err_msg = f"Tier 2 (Groq: {settings.GROQ_MODEL}) failed: {e}"
+            err_msg = f"Tier 2 (Groq: {self.groq_model}) failed: {e}"
             errors.append(err_msg)
             if on_fallback:
                 await on_fallback(f"⚠️ {err_msg} -> Failing over to Tier 3 (OpenRouter)...")
@@ -287,7 +295,7 @@ class LLMChatSession:
             self.messages.append({"role": "assistant", "content": response_text})
             return response_text
         except Exception as e:
-            err_msg = f"Tier 3 (OpenRouter: {settings.OPENROUTER_MODEL}) failed: {e}"
+            err_msg = f"Tier 3 (OpenRouter: {self.openrouter_model}) failed: {e}"
             errors.append(err_msg)
 
         # All tiers exhausted
