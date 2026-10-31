@@ -1,6 +1,8 @@
 """Authentication and GitHub OAuth 2.0 routes and dependencies."""
 
 import secrets
+from urllib.parse import urlencode
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
@@ -10,7 +12,7 @@ from typing import Optional, Dict, Any
 
 from .db import get_db
 from .models import User
-from .settings import settings, secret_value
+from .settings import settings, secret_value, cookie_secure
 from .security import (
     create_access_token,
     decode_access_token,
@@ -46,7 +48,8 @@ async def get_current_user(
         )
 
     payload = decode_access_token(token)
-    if not payload or "sub" not in payload:
+    # Purpose-scoped tokens (stream tickets) are not sessions
+    if not payload or "sub" not in payload or payload.get("purpose"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired session. Please sign in again."
@@ -91,17 +94,17 @@ async def github_login(request: Request):
     state = secrets.token_urlsafe(16)
     scope = "read:user,user:email,repo"
     
-    # Compute callback URL from request or settings
-    api_base = str(request.base_url).rstrip("/")
-    redirect_uri = f"{api_base}/api/auth/github/callback"
-    
-    auth_url = (
-        f"https://github.com/login/oauth/authorize?"
-        f"client_id={settings.GITHUB_CLIENT_ID}&"
-        f"redirect_uri={redirect_uri}&"
-        f"scope={scope}&"
-        f"state={state}"
-    )
+    # Behind the frontend's /api proxy, GitHub must return to the frontend origin so the cookies
+    # set by the callback are first-party there
+    callback_base = (settings.OAUTH_REDIRECT_BASE_URL or str(request.base_url)).rstrip("/")
+    redirect_uri = f"{callback_base}/api/auth/github/callback"
+
+    auth_url = "https://github.com/login/oauth/authorize?" + urlencode({
+        "client_id": settings.GITHUB_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "scope": scope,
+        "state": state,
+    })
     response = RedirectResponse(url=auth_url)
     # Bind the OAuth round-trip to this browser to prevent login CSRF
     response.set_cookie(
@@ -110,6 +113,7 @@ async def github_login(request: Request):
         httponly=True,
         max_age=600,
         samesite="lax",
+        secure=cookie_secure(),
         path="/api/auth/github"
     )
     return response
@@ -247,7 +251,7 @@ async def github_callback(
         httponly=True,
         max_age=settings.JWT_EXPIRE_MINUTES * 60,
         samesite="lax",
-        secure=False  # Set True in production over HTTPS
+        secure=cookie_secure()
     )
     response.delete_cookie(key=OAUTH_STATE_COOKIE, path="/api/auth/github")
     return response
@@ -276,5 +280,5 @@ async def get_me(user: User = Depends(get_current_user)):
 @router.post("/logout")
 async def logout(response: Response):
     """Clears the session cookie and logs the user out."""
-    response.delete_cookie(key=COOKIE_NAME, path="/")
+    response.delete_cookie(key=COOKIE_NAME, path="/", httponly=True, samesite="lax", secure=cookie_secure())
     return {"ok": True, "message": "Successfully logged out."}

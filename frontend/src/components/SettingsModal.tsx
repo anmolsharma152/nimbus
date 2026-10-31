@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from "react";
 import styles from "./SettingsModal.module.css";
 import { useAuth } from "../context/AuthContext";
+import { API_BASE } from "@/lib/api";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -22,7 +23,7 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [isSaving, setIsSaving] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
 
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
+  const apiBase = API_BASE;
 
   useEffect(() => {
     if (!isOpen) return;

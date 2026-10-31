@@ -84,8 +84,11 @@ Once your backend is live and you have your public API URL (e.g. `https://nimbus
 2. Select your repository: **`anmolsharma152/nimbus`**.
 3. Set the **Root Directory** to: `frontend`.
 4. In the **Environment Variables** section, add:
-   * `NEXT_PUBLIC_API_URL` = `https://nimbus-api-l32h.onrender.com`
-   * `NEXT_PUBLIC_WS_URL` = `wss://nimbus-api-l32h.onrender.com`
+   * `API_PROXY_URL` = `https://nimbus-api-l32h.onrender.com` (the frontend proxies `/api/*` here, so the session cookie is first-party)
+   * `NEXT_PUBLIC_WS_URL` = `wss://nimbus-api-l32h.onrender.com` (WebSockets go direct, authenticated by a stream ticket)
+   * `NEXT_PUBLIC_API_URL` is no longer used and can be removed.
+   * On the backend (Render), set `FRONTEND_URL` = `https://nimbusagent.vercel.app` and `OAUTH_REDIRECT_BASE_URL` = `https://nimbusagent.vercel.app`.
+   * In the GitHub OAuth app, set the **Authorization callback URL** to `https://nimbusagent.vercel.app/api/auth/github/callback`.
 5. Click **Deploy**.
 
 Your live frontend at **`https://nimbusagent.vercel.app/`** communicates seamlessly with your cloud control plane!

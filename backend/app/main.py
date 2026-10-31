@@ -21,7 +21,13 @@ from .models import User, Task, TaskEvent, TaskStatus, EventType
 from .worker import enqueue_task
 from .auth import router as auth_router, get_current_user, get_optional_user, decode_access_token
 from .credentials import router as credentials_router, user_router
-from .security import decrypt_secret, verify_internal_api_token
+from .security import (
+    decrypt_secret,
+    verify_internal_api_token,
+    create_stream_ticket,
+    verify_stream_ticket,
+    STREAM_TICKET_TTL,
+)
 from .ratelimit import check_task_submission_limits
 from .settings import settings
 from .logging_config import configure_logging, new_request_id, request_id_var
@@ -290,6 +296,27 @@ async def list_tasks(
         )
         for t in tasks
     ]
+
+class StreamTicketResponse(BaseModel):
+    ticket: Optional[str]
+    expires_in: int
+
+
+@app.post("/api/tasks/{task_id}/stream-ticket", response_model=StreamTicketResponse)
+async def create_task_stream_ticket(
+    task_id: int,
+    user: Optional[User] = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Issues a short-lived ticket for the task's WebSocket, which can't see the frontend's cookie."""
+    task = await db.get(Task, task_id)
+    if not task or (task.user_id is not None and (user is None or task.user_id != user.id)):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    ttl = int(STREAM_TICKET_TTL.total_seconds())
+    if task.user_id is None:
+        return StreamTicketResponse(ticket=None, expires_in=ttl)  # anonymous tasks need no ticket
+    return StreamTicketResponse(ticket=create_stream_ticket(user.id, task_id), expires_in=ttl)
+
 
 @app.get("/api/tasks/{task_id}", response_model=TaskResponse)
 async def get_task(
@@ -566,7 +593,7 @@ async def relay_redis_events(sleep=asyncio.sleep):
 async def websocket_endpoint(
     websocket: WebSocket,
     task_id: int,
-    token: Optional[str] = Query(None),
+    ticket: Optional[str] = Query(None, description="From POST /api/tasks/{id}/stream-ticket"),
     after: Optional[int] = Query(None, description="Resume cursor: only replay events with a larger id")
 ):
     # Accept before rejecting: a pre-accept close reaches browsers as 1006, hiding the 1008 auth code
@@ -580,9 +607,14 @@ async def websocket_endpoint(
         return
 
     if task.user_id is not None:
-        auth_token = token or websocket.cookies.get("nimbus_session")
-        payload = decode_access_token(auth_token) if auth_token else None
-        if not payload or payload.get("sub") != str(task.user_id):
+        # A ticket when connecting cross-origin; the session cookie when the API is same-origin (local dev)
+        allowed_user = verify_stream_ticket(ticket, task_id)
+        if allowed_user is None:
+            cookie = websocket.cookies.get("nimbus_session")
+            payload = decode_access_token(cookie) if cookie else None
+            if payload and not payload.get("purpose"):
+                allowed_user = payload.get("sub")
+        if allowed_user != str(task.user_id):
             await websocket.close(code=1008, reason="Unauthorized access to task stream")
             return
 

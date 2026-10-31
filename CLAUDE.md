@@ -17,7 +17,7 @@ cd frontend
 npm install
 npm run build
 ```
-Config: copy `.env.example` → `.env` (settings load `.env` and `../.env`). Key vars: `DATABASE_URL`, `REDIS_URL`, `GEMINI_API_KEY` / `GROQ_API_KEY` / `OPENROUTER_API_KEY` (at least one needed to run tasks), `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (OAuth), `JWT_SECRET_KEY` (also derives the Fernet key for the credential vault, so rotating it breaks stored secrets), `FRONTEND_URL`, `API_INTERNAL_URL`, `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_WS_URL`.
+Config: copy `.env.example` → `.env` (settings load `.env` and `../.env`). Key vars: `DATABASE_URL`, `REDIS_URL`, `GEMINI_API_KEY` / `GROQ_API_KEY` / `OPENROUTER_API_KEY` (at least one needed to run tasks), `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (OAuth), `JWT_SECRET_KEY` (also derives the Fernet key for the credential vault, so rotating it breaks stored secrets), `FRONTEND_URL`, `OAUTH_REDIRECT_BASE_URL`, `API_INTERNAL_URL`, `API_PROXY_URL` (frontend), `NEXT_PUBLIC_WS_URL`.
 
 System prerequisites: PostgreSQL 16, Redis (optional: without it, `enqueue_task` runs the agent in-process), Docker daemon (optional: without it, `SubprocessWorkspace` runs commands on the host, as a per-task UID with a scrubbed env when the worker is root, as on Render).
 
@@ -73,6 +73,6 @@ frontend (Next.js) ──REST──▶ app/main.py (FastAPI)
       │                     log_event(): TaskEvent row + Redis pub/sub (app/events.py)
       └── manager.broadcast ◀── HTTP POST /api/internal/tasks/{id}/events (worker → API)
 ```
-- `app/auth.py`: GitHub OAuth, JWT in the `nimbus_session` cookie or a Bearer token. `app/credentials.py`: encrypted BYOK vault + onboarding. `app/ratelimit.py`: per-user concurrency/hourly quotas.
+- `app/auth.py`: GitHub OAuth, JWT in the `nimbus_session` cookie or a Bearer token. The frontend proxies `/api/*` to the backend (`frontend/next.config.ts`, `src/lib/api.ts`), so the cookie is first-party; the WebSocket connects to the backend directly with a 60 s ticket from `POST /api/tasks/{id}/stream-ticket` (never a session JWT in the URL). `app/credentials.py`: encrypted BYOK vault + onboarding. `app/ratelimit.py`: per-user concurrency/hourly quotas.
 - `app/db.py`: async SQLAlchemy engine (asyncpg). Schema lives in Alembic **and** in ad-hoc `ALTER TABLE` statements in `main.lifespan`.
 - Live streaming currently depends on the worker's HTTP POST to the internal endpoint. The Redis `subscribe_task` path in `events.py` is never consumed, so cross-replica fan-out does not work.

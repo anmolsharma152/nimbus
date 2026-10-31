@@ -76,3 +76,28 @@ def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
         return payload
     except (jwt.PyJWTError, Exception):
         return None
+
+
+STREAM_TICKET_PURPOSE = "task_stream"
+STREAM_TICKET_TTL = datetime.timedelta(seconds=60)
+
+
+def create_stream_ticket(user_id: int, task_id: int) -> str:
+    """Short-lived token for one task's WebSocket stream.
+
+    The browser connects to the API's WebSocket directly (the frontend's /api proxy can't carry
+    upgrades), where the first-party session cookie isn't sent. The ticket goes in the URL instead,
+    so it is scoped to one task, expires quickly, and is never accepted as a session.
+    """
+    return create_access_token(
+        {"sub": str(user_id), "task_id": task_id, "purpose": STREAM_TICKET_PURPOSE},
+        expires_delta=STREAM_TICKET_TTL,
+    )
+
+
+def verify_stream_ticket(ticket: Optional[str], task_id: int) -> Optional[str]:
+    """Returns the ticket's user id (as a string) if it is a valid stream ticket for this task."""
+    payload = decode_access_token(ticket) if ticket else None
+    if not payload or payload.get("purpose") != STREAM_TICKET_PURPOSE or payload.get("task_id") != task_id:
+        return None
+    return payload.get("sub")

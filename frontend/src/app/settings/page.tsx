@@ -4,6 +4,7 @@ import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import styles from "./settings.module.css";
 import { useAuth } from "../../context/AuthContext";
+import { API_BASE } from "@/lib/api";
 
 interface CredentialStatus {
   provider: string;
@@ -18,7 +19,7 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
+  const apiBase = API_BASE;
 
   const fetchCredentials = async () => {
     if (!isAuthenticated) return;

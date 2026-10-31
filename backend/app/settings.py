@@ -74,6 +74,17 @@ class Settings(BaseSettings):
         default="http://localhost:3000",
         description="Frontend web application base URL for OAuth redirects."
     )
+    OAUTH_REDIRECT_BASE_URL: str | None = Field(
+        default=None,
+        description=(
+            "Public origin GitHub redirects back to after sign-in. Set it to the frontend URL when the "
+            "frontend proxies /api (so the session cookie is first-party). Defaults to the API's own origin."
+        )
+    )
+    COOKIE_SECURE: bool | None = Field(
+        default=None,
+        description="Mark auth cookies Secure. Defaults to true when FRONTEND_URL is https."
+    )
     MAX_AGENT_ITERATIONS: int = Field(
         default=20,
         description="Maximum turns allowed for an agent task."
@@ -111,3 +122,9 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def cookie_secure() -> bool:
+    if settings.COOKIE_SECURE is not None:
+        return settings.COOKIE_SECURE
+    return settings.FRONTEND_URL.lower().startswith("https://")

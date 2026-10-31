@@ -6,6 +6,7 @@ import Link from "next/link";
 import styles from "./page.module.css";
 import SettingsModal from "../components/SettingsModal";
 import { useAuth } from "../context/AuthContext";
+import { API_BASE } from "@/lib/api";
 
 const PROMPT_PRESETS = [
   {
@@ -56,7 +57,7 @@ export default function Home() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   const router = useRouter();
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
+  const apiBase = API_BASE;
 
   // Sync ghUser with authenticated user when logged in
   useEffect(() => {

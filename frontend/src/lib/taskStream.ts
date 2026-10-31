@@ -53,3 +53,11 @@ export function reconnectDelay(attempt: number): number {
 
 /** Close code the server uses for "task not found / not authorized"; retrying won't help. */
 export const STREAM_REJECTED_CODE = 1008;
+
+export function streamUrl(wsBase: string, taskId: string | number, after: number, ticket: string | null): string {
+  const params = new URLSearchParams();
+  if (ticket) params.set("ticket", ticket);
+  if (after > 0) params.set("after", String(after));
+  const query = params.toString();
+  return `${wsBase}/ws/tasks/${taskId}${query ? `?${query}` : ""}`;
+}

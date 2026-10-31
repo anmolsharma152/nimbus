@@ -10,7 +10,9 @@ import {
   mergeEvents,
   reconnectDelay,
   STREAM_REJECTED_CODE,
+  streamUrl,
 } from "@/lib/taskStream";
+import { API_BASE, WS_BASE } from "@/lib/api";
 
 interface EventPayload {
   id?: number | null;
@@ -55,8 +57,8 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
   const scrollRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
 
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
-  const wsBase = process.env.NEXT_PUBLIC_WS_URL || apiBase.replace(/^http/, "ws");
+  const apiBase = API_BASE;
+  const wsBase = WS_BASE;
 
   const isTerminal = isTerminalStatus(task?.status);
   // Live stream health and resume cursor, read by the poller and reconnect logic
@@ -173,12 +175,32 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
       }
     };
 
-    function connect() {
+    async function connect() {
       if (disposed) return;
+      // The socket goes straight to the backend, which can't see our cookie: fetch a fresh ticket per attempt
+      let ticket: string | null = null;
+      try {
+        const res = await fetch(`${apiBase}/api/tasks/${id}/stream-ticket`, {
+          method: "POST",
+          credentials: "include",
+        });
+        if (res.status === 401 || res.status === 404) {
+          console.warn("Task stream not available:", res.status);
+          return;
+        }
+        if (!res.ok) throw new Error(`stream ticket request failed (${res.status})`);
+        ticket = (await res.json()).ticket ?? null;
+      } catch (ticketErr) {
+        console.warn("Stream ticket notice:", ticketErr);
+        scheduleReconnect();
+        return;
+      }
+      if (disposed) return;
+
       const after = lastEventIdRef.current;
       let socket: WebSocket;
       try {
-        socket = new WebSocket(`${wsBase}/ws/tasks/${id}${after > 0 ? `?after=${after}` : ""}`);
+        socket = new WebSocket(streamUrl(wsBase, id, after, ticket));
       } catch (wsErr) {
         console.warn("WebSocket connection notice:", wsErr);
         scheduleReconnect();

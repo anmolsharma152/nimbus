@@ -86,7 +86,9 @@ sequenceDiagram
     API->>DB: Insert Task record (status: PENDING)
     API->>Redis: Enqueue run_agent_loop(task_id)
     API-->>UI: Return task_id
-    UI->>API: Open WebSocket /ws/tasks/{id}?token={jwt}
+    UI->>API: POST /api/tasks/{id}/stream-ticket (session cookie via /api proxy)
+    API-->>UI: 60s task-scoped ticket
+    UI->>API: Open WebSocket /ws/tasks/{id}?ticket={ticket}
     API->>DB: Query & Stream Historical Events
     API-->>UI: Replay Historical Stream
 

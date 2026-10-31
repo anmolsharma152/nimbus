@@ -6,6 +6,7 @@ import { useRouter, usePathname } from "next/navigation";
 import styles from "./Sidebar.module.css";
 import SettingsModal from "./SettingsModal";
 import { useAuth } from "../context/AuthContext";
+import { API_BASE } from "@/lib/api";
 
 export interface TaskItem {
   id: number;
@@ -24,7 +25,7 @@ export default function Sidebar() {
   const router = useRouter();
   const pathname = usePathname();
 
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
+  const apiBase = API_BASE;
 
   const fetchTasks = async () => {
     try {
