@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 
 from .db import get_db, engine, Base, async_session
 from .events import event_bus
-from .models import User, Task, TaskEvent, TaskStatus, EventType
+from .models import User, Task, TaskEvent, TaskMessage, TaskStatus, EventType
 from .worker import enqueue_task
 from .auth import router as auth_router, get_optional_user, decode_access_token
 from .credentials import router as credentials_router, user_router
@@ -54,6 +54,9 @@ async def lifespan(app: FastAPI):
                     await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS git_branch VARCHAR;"))
                     await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS pr_url VARCHAR;"))
                     await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS patch_diff TEXT;"))
+                    await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS base_sha VARCHAR(40);"))
+                    await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS pushed_sha VARCHAR(40);"))
+                    await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS head_repo VARCHAR;"))
                 except Exception as alter_err:
                     logger.warning("Column migration check failed: %s", alter_err)
     except Exception as e:
@@ -447,52 +450,92 @@ async def cancel_task(
     
     return TaskCancelResponse(id=task.id, status="cancelled", message="Task cancelled successfully")
 
+async def _load_rerunnable_task(task_id: int, user: Optional[User], db: AsyncSession) -> Task:
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    if task.user_id is not None and (user is None or task.user_id != user.id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    # Anonymous repo tasks created before sign-in was required cannot be re-run
+    if task.repo_url and task.user_id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=SIGN_IN_FOR_REPO_TASKS)
+    return task
+
+
+async def _requeue(task: Task, db: AsyncSession, log_message: str):
+    task.status = TaskStatus.PENDING
+    await db.commit()
+
+    db.add(TaskEvent(
+        task_id=task.id,
+        event_type=EventType.LOG,
+        payload=json.dumps({"message": log_message})
+    ))
+    await db.commit()
+
+    await manager.broadcast_event(task.id, {
+        "type": "status",
+        "payload": json.dumps({"status": "pending"}),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    })
+    await enqueue_task(task.id, task.prompt, task.repo_url, task.git_branch)
+
+
 @app.post("/api/tasks/{task_id}/retry")
 async def retry_task(
     task_id: int,
     user: Optional[User] = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db)
 ):
-    result = await db.execute(select(Task).where(Task.id == task_id))
-    task = result.scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
-    
-    if task.user_id is not None and (user is None or task.user_id != user.id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
-    # Anonymous repo tasks created before sign-in was required cannot be re-run
-    if task.repo_url and task.user_id is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=SIGN_IN_FOR_REPO_TASKS)
+    """Starts the task over from a fresh checkout, with the original prompt and every follow-up.
+
+    The branch, PR and last pushed commit are kept, so the new result replaces the old one on the
+    same branch and PR instead of failing on an existing branch.
+    """
+    task = await _load_rerunnable_task(task_id, user, db)
     if task.user_id is None:
         await check_task_submission_limits(None, db)
-    
-    # Reset task state for fresh execution
-    task.status = TaskStatus.PENDING
+
     task.patch_diff = None
-    task.pr_url = None
-    await db.commit()
-    
-    # Log restart event
-    retry_event = TaskEvent(
-        task_id=task.id,
-        event_type=EventType.LOG,
-        payload=json.dumps({"message": "🔄 Task restarted by user. Relaunching agent reasoning loop..."})
-    )
-    db.add(retry_event)
-    await db.commit()
-    
-    # Broadcast status change to live WebSockets
-    status_payload = {
-        "type": "status",
-        "payload": json.dumps({"status": "pending"}),
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
-    }
-    await manager.broadcast_event(task_id, status_payload)
-    
-    # Re-enqueue task execution
-    await enqueue_task(task.id, task.prompt, task.repo_url, task.git_branch)
-    
+    task.base_sha = None
+    await _requeue(task, db, "🔄 Task restarted by user. Relaunching agent reasoning loop...")
     return {"id": task.id, "status": "pending", "message": "Task re-queued successfully"}
+
+
+class FollowUpCreate(BaseModel):
+    message: str
+
+    @field_validator("message")
+    @classmethod
+    def _non_empty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Follow-up message is empty.")
+        if len(v) > 10_000:
+            raise ValueError("Follow-up message is longer than 10,000 characters.")
+        return v
+
+
+@app.post("/api/tasks/{task_id}/messages")
+async def send_follow_up(
+    task_id: int,
+    req: FollowUpCreate,
+    user: Optional[User] = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Continues a finished task: same task, same branch and PR, building on its current changes."""
+    task = await _load_rerunnable_task(task_id, user, db)
+    if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This task is still running. Wait for it to finish or stop it before sending a follow-up."
+        )
+    await check_task_submission_limits(user if task.user_id is not None else None, db)
+
+    db.add(TaskMessage(task_id=task.id, content=req.message))
+    await _requeue(task, db, f"💬 Follow-up: {req.message}")
+    return {"id": task.id, "status": "pending", "message": "Follow-up queued on this task"}
 
 @app.delete("/api/tasks/{task_id}")
 async def delete_task(
@@ -526,6 +569,7 @@ async def clear_all_tasks(
     task_ids = user_tasks.scalars().all()
     if task_ids:
         await db.execute(delete(TaskEvent).where(TaskEvent.task_id.in_(task_ids)))
+        await db.execute(delete(TaskMessage).where(TaskMessage.task_id.in_(task_ids)))
         await db.execute(delete(Task).where(Task.id.in_(task_ids)))
     await db.commit()
     return {"ok": True, "message": "Tasks cleared successfully"}

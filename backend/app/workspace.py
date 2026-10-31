@@ -177,10 +177,11 @@ def push_script(
     message: str,
     author_name: str,
     author_email: str,
-    push_url: Optional[str] = None
+    push_url: Optional[str] = None,
+    expect_sha: Optional[str] = None
 ) -> str:
     """Rebuilds the agent's change on the base commit from remote_url and pushes it to push_url
-    (a fork) or back to remote_url."""
+    (a fork) or back to remote_url. Prints the pushed commit's SHA last."""
     q = shlex.quote
     lines = [
         "set -e",
@@ -197,13 +198,28 @@ def push_script(
     if push_url:
         lines.append(f"git remote add target {q(push_url)}")
         target = "target"
-    # Empty lease value = the branch must not exist yet, so a task can never overwrite or
-    # fast-forward an existing branch (the repo's default branch included)
+    # The lease names what the branch must currently be on the remote: nothing for a new branch
+    # (so no existing branch, the default included, is ever touched), or the commit Nimbus itself
+    # pushed last for a follow-up (replaced only if nobody else has pushed since)
+    lease = f"refs/heads/{branch_name}:{expect_sha or ''}"
     lines.append(
-        f"git push -q --force-with-lease={q('refs/heads/' + branch_name + ':')} {target} "
-        f"{q('HEAD:refs/heads/' + branch_name)}"
+        f"git push -q --force-with-lease={q(lease)} {target} {q('HEAD:refs/heads/' + branch_name)}"
     )
+    lines.append("git rev-parse HEAD")
     return "\n".join(lines)
+
+
+def check_start_point(start_point: Optional[str]) -> Optional[str]:
+    if start_point is not None and not _SHA_RE.match(start_point):
+        raise ValueError("start_point must be a full commit SHA")
+    return start_point
+
+
+PRIOR_PATCH_NAME = "nimbus-prior.patch"
+
+
+def apply_patch_command(patch_path: str) -> str:
+    return f"git apply --whitespace=nowarn {shlex.quote(patch_path)}; rc=$?; rm -f {shlex.quote(patch_path)}; exit $rc"
 
 
 def github_push_url(repo_url: str) -> Optional[str]:
@@ -320,8 +336,10 @@ class DockerWorkspace:
         self,
         repo_url: Optional[str] = None,
         branch_name: Optional[str] = None,
-        github_token: Optional[str] = None
+        github_token: Optional[str] = None,
+        start_point: Optional[str] = None
     ) -> Tuple[int, str]:
+        check_start_point(start_point)
         image_error = self._ensure_image()
         if image_error:
             return 1, image_error
@@ -341,7 +359,7 @@ class DockerWorkspace:
             )
             if code != 0:
                 return code, f"Failed to clone repository {cleaned_url}: {out}"
-            self.base_sha = parse_base_sha(out)
+            self.base_sha = start_point or parse_base_sha(out)
             logs.append(f"Cloned {cleaned_url}")
 
         # The agent container starts only after every token-bearing process has exited
@@ -358,8 +376,9 @@ class DockerWorkspace:
         if repo_url:
 
             if branch_name:
+                start = f" {start_point}" if start_point else ""
                 code_b, out_b = self.execute_command(
-                    f"git checkout -b {shlex.quote(branch_name)}",
+                    f"git checkout -b {shlex.quote(branch_name)}{start}",
                     workdir="/workspace/repo"
                 )
                 if code_b != 0:
@@ -416,6 +435,14 @@ class DockerWorkspace:
             output += f"\n[Command timed out after {timeout} seconds]"
         return exit_code, output.strip()
 
+    def apply_patch(self, patch: str) -> Tuple[int, str]:
+        """Re-applies a previous run's change (uncommitted) in the agent container."""
+        if not self.container:
+            return 1, "Workspace is not running."
+        data = patch if patch.endswith("\n") else patch + "\n"
+        self.container.put_archive("/tmp", _tar_bytes({PRIOR_PATCH_NAME: data.encode()}))
+        return self.execute_command(apply_patch_command(f"/tmp/{PRIOR_PATCH_NAME}"), workdir=self.workdir)
+
     def get_diff(self) -> str:
         if not self.container:
             return ""
@@ -449,7 +476,8 @@ class DockerWorkspace:
         message: str = "Nimbus agent automated changes",
         author_name: str = "Nimbus Agent",
         author_email: str = "agent@nimbus.ai",
-        push_url: Optional[str] = None
+        push_url: Optional[str] = None,
+        expect_sha: Optional[str] = None
     ) -> Tuple[int, str]:
         """Replays the agent's changes onto a fresh clone inside a helper container and pushes it."""
         if not github_token:
@@ -469,7 +497,7 @@ class DockerWorkspace:
         return self._run_helper(
             push_script(
                 remote_url, self.base_sha, branch_name, "/tmp/changes.patch", "/tmp/push",
-                clean_commit_message(message), author_name, author_email, push_url
+                clean_commit_message(message), author_name, author_email, push_url, expect_sha
             ),
             environment=git_auth_env(github_token),
             mount_repo_volume=False,
@@ -592,8 +620,10 @@ class SubprocessWorkspace:
         self,
         repo_url: Optional[str] = None,
         branch_name: Optional[str] = None,
-        github_token: Optional[str] = None
+        github_token: Optional[str] = None,
+        start_point: Optional[str] = None
     ) -> Tuple[int, str]:
+        check_start_point(start_point)
         # Unpredictable, atomically created 0700 dir: nothing can pre-plant symlinks in it
         self.base_dir = tempfile.mkdtemp(prefix=f"nimbus-workspace-{self.task_id}-")
         self.workdir = os.path.join(self.base_dir, "repo")
@@ -607,13 +637,14 @@ class SubprocessWorkspace:
             )
             if code != 0:
                 return code, f"Failed to clone repository {cleaned_url}: {out}"
-            self.base_sha = parse_base_sha(out)
+            self.base_sha = start_point or parse_base_sha(out)
             self._hand_over_to_sandbox()
             logs.append(f"Cloned {cleaned_url}")
 
             if branch_name:
+                start = f" {start_point}" if start_point else ""
                 code_b, out_b = self.execute_command(
-                    f"git checkout -b {shlex.quote(branch_name)}",
+                    f"git checkout -b {shlex.quote(branch_name)}{start}",
                     workdir=self.workdir
                 )
                 if code_b != 0:
@@ -650,6 +681,16 @@ class SubprocessWorkspace:
         out = stdout.decode("utf-8", errors="replace") + stderr.decode("utf-8", errors="replace")
         return code, out.strip()
 
+    def apply_patch(self, patch: str) -> Tuple[int, str]:
+        """Re-applies a previous run's change (uncommitted), as the sandbox user."""
+        data = patch if patch.endswith("\n") else patch + "\n"
+        patch_path = os.path.join(self.base_dir, PRIOR_PATCH_NAME)  # outside the repo
+        with open(patch_path, "w") as f:
+            f.write(data)
+        if self.sandbox_uid is not None:
+            os.lchown(patch_path, self.sandbox_uid, self.sandbox_uid)
+        return self.execute_command(apply_patch_command(patch_path), workdir=self.workdir)
+
     def get_diff(self) -> str:
         self.execute_command("git add -N .", workdir=self.workdir)
         code, out = self.execute_command("git diff HEAD", workdir=self.workdir)
@@ -679,7 +720,8 @@ class SubprocessWorkspace:
         author_name: str = "Nimbus Agent",
         author_email: str = "agent@nimbus.ai",
         remote_url: Optional[str] = None,
-        push_url: Optional[str] = None
+        push_url: Optional[str] = None,
+        expect_sha: Optional[str] = None
     ) -> Tuple[int, str]:
         """Replays the agent's changes onto a fresh private clone and pushes that, never the agent's .git."""
         if not github_token and remote_url is None:
@@ -709,7 +751,7 @@ class SubprocessWorkspace:
             return self._run_trusted_git(
                 push_script(
                     remote_url, self.base_sha, branch_name, patch_path, "push",
-                    clean_commit_message(message), author_name, author_email, push_url
+                    clean_commit_message(message), author_name, author_email, push_url, expect_sha
                 ),
                 github_token
             )
@@ -752,13 +794,20 @@ class UnifiedWorkspace:
     def __init__(self, task_id: int, impl=None):
         self.impl = impl or create_workspace(task_id)
 
+    @property
+    def base_sha(self) -> Optional[str]:
+        return getattr(self.impl, "base_sha", None)
+
     async def asetup(
         self,
         repo_url: Optional[str] = None,
         branch_name: Optional[str] = None,
-        github_token: Optional[str] = None
+        github_token: Optional[str] = None,
+        start_point: Optional[str] = None
     ) -> Tuple[int, str]:
-        return await asyncio.to_thread(self.impl.setup, repo_url, branch_name, github_token)
+        return await asyncio.to_thread(
+            self.impl.setup, repo_url, branch_name, github_token, start_point=start_point
+        )
 
     async def aexecute_command(
         self,
@@ -785,12 +834,17 @@ class UnifiedWorkspace:
         message: str = "Nimbus agent automated changes",
         author_name: str = "Nimbus Agent",
         author_email: str = "agent@nimbus.ai",
-        push_url: Optional[str] = None
+        push_url: Optional[str] = None,
+        expect_sha: Optional[str] = None
     ) -> Tuple[int, str]:
         return await asyncio.to_thread(
             self.impl.push_branch, branch_name, repo_url, github_token,
-            message=message, author_name=author_name, author_email=author_email, push_url=push_url
+            message=message, author_name=author_name, author_email=author_email,
+            push_url=push_url, expect_sha=expect_sha
         )
+
+    async def aapply_patch(self, patch: str) -> Tuple[int, str]:
+        return await asyncio.to_thread(self.impl.apply_patch, patch)
 
     async def acleanup(self):
         await asyncio.to_thread(self.impl.cleanup)

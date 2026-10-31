@@ -137,6 +137,7 @@ async def test_worker_logs_task_context_and_one_summary_per_task():
     db = AsyncMock()
     db.get = AsyncMock(return_value=task)
     db.add = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock())  # SQLAlchemy results are sync objects
     ws = MagicMock()
     ws.asetup = AsyncMock(return_value=(128, "Failed to set up workspace"))
     ws.acleanup = AsyncMock()

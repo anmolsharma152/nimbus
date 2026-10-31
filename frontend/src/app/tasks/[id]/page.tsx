@@ -54,6 +54,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
   const [copied, setCopied] = useState(false);
   const [followupText, setFollowupText] = useState("");
   const [isSendingFollowup, setIsSendingFollowup] = useState(false);
+  const [followupError, setFollowupError] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
@@ -302,26 +303,34 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
     e.preventDefault();
     if (!followupText.trim() || isSendingFollowup) return;
     setIsSendingFollowup(true);
+    setFollowupError(null);
 
     try {
-      // Launch a new follow-up task targeting the same repo & context
-      const newPrompt = `Follow-up on Task #${id}:\nOriginal Goal: ${task?.prompt}\n\nAdditional Directive: ${followupText.trim()}`;
-      const res = await fetch(`${apiBase}/api/tasks`, {
+      // Continues this task: same branch and PR, building on the changes made so far
+      const res = await fetch(`${apiBase}/api/tasks/${id}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({
-          prompt: newPrompt,
-          repo_url: task?.repo_url || null,
-        }),
+        body: JSON.stringify({ message: followupText.trim() }),
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        router.push(`/tasks/${data.id}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        const detail = typeof body?.detail === "string" ? body.detail : `Request failed (${res.status})`;
+        setFollowupError(detail);
+        return;
       }
+      setFollowupText("");
+      setTask((prev) => (prev ? { ...prev, status: "pending" } : null));
+      fetch(`${apiBase}/api/tasks/${id}/events`, { credentials: "include" })
+        .then((r) => (r.ok ? r.json() : []))
+        .then((data) => {
+          if (Array.isArray(data)) setEvents(data);
+        })
+        .catch(() => {});
     } catch (err) {
-      console.error("Failed to send follow-up prompt", err);
+      console.error("Failed to send follow-up", err);
+      setFollowupError("Could not reach the server. Please try again.");
     } finally {
       setIsSendingFollowup(false);
     }
@@ -494,10 +503,16 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
               <button
                 type="submit"
                 className={styles.followupBtn}
-                disabled={!followupText.trim() || isSendingFollowup}
+                disabled={!followupText.trim() || isSendingFollowup || isStopable}
+                title={isStopable ? "Wait for the current run to finish" : undefined}
               >
                 {isSendingFollowup ? "Dispatching..." : "Send Follow-Up Directives ➔"}
               </button>
+              {followupError && (
+                <p className={styles.followupError} role="alert">
+                  {followupError}
+                </p>
+              )}
             </form>
           </div>
 

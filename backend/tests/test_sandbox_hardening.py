@@ -373,3 +373,64 @@ def test_push_to_stale_fork_builds_on_upstream_base(bare_remote, tmp_path):
     assert _remote_sha(fork, "main") == fork_main  # fork's own branches untouched
     with pytest.raises(subprocess.CalledProcessError):
         _remote_sha(bare_remote, "nimbus/task-4245")  # nothing pushed upstream
+
+
+def test_follow_up_rebuilds_state_and_replaces_only_its_own_push(bare_remote):
+    """Turn 2 starts from turn 1's base + patch, and the push replaces turn 1's commit via the lease."""
+    remote_url = f"file://{bare_remote}"
+    branch = "nimbus/task-4246"
+
+    ws = SubprocessWorkspace(task_id=4246)
+    try:
+        assert ws.setup(repo_url=remote_url, branch_name=branch)[0] == 0
+        base = ws.base_sha
+        ws.execute_command("echo one > one.txt")
+        prior_patch = ws.get_diff()
+        ws.commit_changes("turn 1")
+        code, out = ws.push_branch(branch, "https://github.com/o/r", None, remote_url=remote_url)
+        assert code == 0, out
+        first_push = out.strip().splitlines()[-1]
+    finally:
+        ws.cleanup()
+    assert _remote_sha(bare_remote, branch) == first_push
+
+    # Upstream moves on; the follow-up must still build on the task's original base
+    work = bare_remote.parent / "mover"
+    _git("clone", "-q", str(bare_remote), str(work))
+    (work / "other.txt").write_text("x\n")
+    _git("add", ".", cwd=work)
+    _git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "other", cwd=work)
+    _git("push", "-q", "origin", "main", cwd=work)
+
+    ws = SubprocessWorkspace(task_id=4247)
+    try:
+        assert ws.setup(repo_url=remote_url, branch_name=branch, start_point=base)[0] == 0
+        assert ws.base_sha == base
+        code, out = ws.apply_patch(prior_patch)
+        assert code == 0, out
+        ws.execute_command("echo two > two.txt")
+        ws.commit_changes("turn 2")
+
+        # Wrong expectation (someone else pushed): refused
+        code, _ = ws.push_branch(branch, "https://github.com/o/r", None, remote_url=remote_url, expect_sha=base)
+        assert code != 0
+        assert _remote_sha(bare_remote, branch) == first_push
+
+        code, out = ws.push_branch(branch, "https://github.com/o/r", None, remote_url=remote_url, expect_sha=first_push)
+        assert code == 0, out
+    finally:
+        ws.cleanup()
+
+    head = _remote_sha(bare_remote, branch)
+    assert head != first_push
+    assert _remote_sha(bare_remote, f"{branch}^") == base
+    files = subprocess.run(
+        ["git", "ls-tree", "--name-only", head], cwd=bare_remote, capture_output=True, text=True, check=True
+    ).stdout.split()
+    assert {"one.txt", "two.txt"} <= set(files) and "other.txt" not in files
+
+
+def test_setup_rejects_non_sha_start_point():
+    ws = SubprocessWorkspace(task_id=4248)
+    with pytest.raises(ValueError):
+        ws.setup(repo_url="file:///nonexistent", branch_name="b", start_point="main; rm -rf /")

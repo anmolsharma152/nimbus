@@ -128,6 +128,7 @@ def _worker_db(task):
     db = AsyncMock()
     db.get = AsyncMock(return_value=task)
     db.add = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock())  # SQLAlchemy results are sync objects
     return db
 
 

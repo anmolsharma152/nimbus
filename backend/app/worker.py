@@ -14,10 +14,10 @@ from sqlalchemy.future import select
 import shlex
 
 from .db import async_session
-from .models import User, UserCredential, Task, TaskEvent, EventType, TaskStatus
+from .models import User, UserCredential, Task, TaskEvent, TaskMessage, EventType, TaskStatus
 from .settings import settings, secret_value
 from .security import decrypt_secret, internal_api_token
-from .workspace import UnifiedWorkspace, github_push_url, get_docker_client, reap_orphaned_containers, reap_orphaned_volumes
+from .workspace import UnifiedWorkspace, github_push_url, parse_base_sha, get_docker_client, reap_orphaned_containers, reap_orphaned_volumes
 from .github_client import RepoAccess, create_draft_pr, ensure_fork, get_repo_access, parse_github_repo
 from .llm import LLMChatSession
 from .branches import validate_task_branch
@@ -134,12 +134,18 @@ async def _deliver_changes(
     stats: dict,
 ):
     """Pushes the task branch (to a fork when the user cannot push upstream) and opens a draft PR
-    against the repo's default branch."""
+    against the repo's default branch. Follow-ups update the same branch and PR."""
     task_id = task.id
     push_url = None
     head_owner = None
     fork_name = None
-    if not repo_access.can_push:
+    if task.head_repo:
+        # Follow-up: keep using wherever the branch already lives
+        if task.head_repo.lower() != repo_access.full_name.lower():
+            fork_name = task.head_repo
+            push_url = github_push_url(fork_name)
+            head_owner = fork_name.split("/", 1)[0]
+    elif not repo_access.can_push:
         await log_event(db, task_id, EventType.LOG, {"message": f"Forking {repo_access.full_name} to your account..."})
         fork_name, fork_error = await ensure_fork(repo_access, token)
         if fork_error:
@@ -156,9 +162,21 @@ async def _deliver_changes(
         author_name=author_name,
         author_email=author_email,
         push_url=push_url,
+        expect_sha=task.pushed_sha,
     )
     if push_code != 0:
-        await log_event(db, task_id, EventType.LOG, {"message": f"Failed to push branch: {push_out}"})
+        hint = (
+            " The branch changed since Nimbus last pushed it, so it was left as is."
+            if task.pushed_sha and "stale info" in (push_out or "") else ""
+        )
+        await log_event(db, task_id, EventType.LOG, {"message": f"Failed to push branch: {push_out}{hint}"})
+        return
+    task.pushed_sha = parse_base_sha(push_out or "") or task.pushed_sha
+    task.head_repo = target
+    await db.commit()
+
+    if task.pr_url:
+        await log_event(db, task_id, EventType.LOG, {"message": f"Updated draft PR: {task.pr_url}"})
         return
 
     pr_url = await create_draft_pr(
@@ -274,6 +292,11 @@ async def _execute_agent_task(
                 )
                 return
 
+        follow_ups_res = await db.execute(
+            select(TaskMessage.content).where(TaskMessage.task_id == task_id).order_by(TaskMessage.id)
+        )
+        follow_ups = [m for m in follow_ups_res.scalars().all() if isinstance(m, str)]
+
         task.status = TaskStatus.RUNNING
         task.git_branch = branch_name
         await db.commit()
@@ -291,15 +314,31 @@ async def _execute_agent_task(
             })
 
         try:
+            # A follow-up rebuilds the task's state: same base commit plus its changes so far
+            prior_patch = task.patch_diff
             setup_code, setup_out = await workspace.asetup(
                 repo_url=repo_url,
                 branch_name=branch_name,
-                github_token=final_github_token
+                github_token=final_github_token,
+                start_point=task.base_sha if (repo_url and prior_patch) else None
             )
             if setup_code != 0:
                 raise RuntimeError(f"Workspace setup failed: {setup_out}")
             if setup_out:
                 await log_event(db, task_id, EventType.LOG, {"message": setup_out})
+            if repo_url and workspace.base_sha:
+                task.base_sha = workspace.base_sha
+                await db.commit()
+
+            continuing = None
+            if prior_patch:
+                apply_code, apply_out = await workspace.aapply_patch(prior_patch)
+                continuing = apply_code == 0
+                await log_event(db, task_id, EventType.LOG, {"message": (
+                    "Restored the task's changes so far; continuing from there."
+                    if continuing else
+                    f"Could not restore the task's earlier changes ({apply_out[:300]}); starting from a clean checkout."
+                )})
 
             # Configure user author identity inside the sandbox
             await workspace.aexecute_command(f"git config user.name {shlex.quote(git_user_name)}")
@@ -331,7 +370,7 @@ async def _execute_agent_task(
             outcome = await run_agent_commands(
                 llm_session,
                 workspace,
-                initial_prompt(prompt, repo_url, branch_name),
+                initial_prompt(prompt, repo_url, branch_name, follow_ups=follow_ups, continuing=continuing),
                 emit,
                 max_iterations=settings.MAX_AGENT_ITERATIONS,
                 stats=stats,

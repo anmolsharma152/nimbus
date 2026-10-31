@@ -7,7 +7,7 @@ output becomes the next prompt. A reply without a command block is the final sum
 import asyncio
 import json
 import logging
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional, Sequence
 
 from .models import EventType
 
@@ -36,13 +36,35 @@ MAX_OUTPUT_CHARS = 10000  # command output fed back to the LLM, to prevent conte
 EmitFn = Callable[[EventType, dict], Awaitable[None]]
 
 
-def initial_prompt(prompt: str, repo_url: Optional[str], branch_name: str) -> str:
-    return (
-        f"Task Goal:\n{prompt}\n\n"
+def initial_prompt(
+    prompt: str,
+    repo_url: Optional[str],
+    branch_name: str,
+    follow_ups: Sequence[str] = (),
+    continuing: Optional[bool] = None,
+) -> str:
+    """continuing: True = earlier changes were restored, False = restoring them failed,
+    None = fresh start (first run, or a retry that redoes everything)."""
+    parts = [f"Task Goal:\n{prompt}\n"]
+    if follow_ups:
+        earlier, latest = list(follow_ups[:-1]), follow_ups[-1]
+        for i, message in enumerate(earlier, 1):
+            parts.append(f"Earlier follow-up {i}:\n{message}\n")
+        parts.append(f"Latest follow-up (do this now):\n{latest}\n")
+        if continuing:
+            parts.append("The work from earlier turns is already in the working tree (uncommitted); build on it.\n")
+        else:
+            lost = "Earlier changes could not be restored, so the" if continuing is False else "The"
+            parts.append(
+                f"{lost} working tree is a clean checkout: do what the goal and earlier follow-ups ask, "
+                "then the latest follow-up.\n"
+            )
+    parts.append(
         f"Repository: {repo_url or 'Local workspace repository'}\n"
         f"Active Branch: {branch_name}\n"
         "Begin by listing files or inspecting the project structure."
     )
+    return "\n".join(parts)
 
 
 async def run_agent_commands(

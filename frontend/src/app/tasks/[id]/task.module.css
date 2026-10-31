@@ -458,3 +458,9 @@
   align-items: center;
   justify-content: center;
 }
+
+.followupError {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--danger, #ef4444);
+}

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func
 
-from .models import User, Task, TaskStatus
+from .models import User, Task, TaskMessage, TaskStatus
 from .settings import settings
 
 
@@ -26,6 +26,18 @@ async def _extract_scalar(result) -> int:
         except (ValueError, TypeError):
             return 0
     return 0
+
+
+def _hourly_runs(owner_filter, since):
+    """One query: tasks created plus follow-ups sent since `since`, each of which runs the agent."""
+    new_tasks = select(func.count(Task.id)).where(owner_filter, Task.created_at >= since).scalar_subquery()
+    follow_ups = (
+        select(func.count(TaskMessage.id))
+        .join(Task, Task.id == TaskMessage.task_id)
+        .where(owner_filter, TaskMessage.created_at >= since)
+        .scalar_subquery()
+    )
+    return select(new_tasks + follow_ups)
 
 
 async def check_task_submission_limits(
@@ -60,12 +72,7 @@ async def check_task_submission_limits(
             )
 
         # 2. Check hourly submission rate
-        hourly_res = await db.execute(
-            select(func.count(Task.id)).where(
-                Task.user_id == user.id,
-                Task.created_at >= one_hour_ago
-            )
-        )
+        hourly_res = await db.execute(_hourly_runs(Task.user_id == user.id, one_hour_ago))
         hourly_count = await _extract_scalar(hourly_res)
         if hourly_count >= max_per_hour:
             raise HTTPException(
@@ -88,12 +95,7 @@ async def check_task_submission_limits(
             )
 
         # Shared hourly budget for all anonymous visitors (tasks carry no per-visitor identity)
-        hourly_res = await db.execute(
-            select(func.count(Task.id)).where(
-                Task.user_id.is_(None),
-                Task.created_at >= one_hour_ago
-            )
-        )
+        hourly_res = await db.execute(_hourly_runs(Task.user_id.is_(None), one_hour_ago))
         hourly_count = await _extract_scalar(hourly_res)
         if hourly_count >= settings.ANON_TASKS_PER_HOUR:
             raise HTTPException(
