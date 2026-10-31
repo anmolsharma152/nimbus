@@ -7,6 +7,7 @@ import styles from "./page.module.css";
 import SettingsModal from "../components/SettingsModal";
 import { useAuth } from "../context/AuthContext";
 import { API_BASE } from "@/lib/api";
+import { filterRepos } from "@/lib/repos";
 
 const PROMPT_PRESETS = [
   {
@@ -138,10 +139,7 @@ export default function Home() {
     }
   };
 
-  const filteredRepos = repos.filter((r) =>
-    r.name.toLowerCase().includes(repoSearchFilter.toLowerCase()) ||
-    (r.description && r.description.toLowerCase().includes(repoSearchFilter.toLowerCase()))
-  );
+  const filteredRepos = filterRepos(repos, repoSearchFilter, repoUrl);
 
   // 1. GUEST / FIRST-TIME VISITOR LANDING PAGE
   if (!isAuthenticated && !isAuthLoading) {
@@ -469,14 +467,27 @@ export default function Home() {
               {/* Complete Repository Dropdown Select */}
               {repos.length > 0 && (
                 <div style={{ marginBottom: "10px" }}>
+                  <input
+                    type="search"
+                    className={styles.repoInput}
+                    style={{ marginBottom: "8px" }}
+                    placeholder={`Search ${repos.length} repositories by name, language or description`}
+                    aria-label="Search repositories"
+                    value={repoSearchFilter}
+                    onChange={(e) => setRepoSearchFilter(e.target.value)}
+                  />
                   <select
                     className={styles.repoInput}
                     style={{ cursor: "pointer", background: "#0b0c15", padding: "10px 12px", marginBottom: "8px" }}
                     value={repoUrl}
                     onChange={(e) => setRepoUrl(e.target.value)}
                   >
-                    <option value="">-- Choose from {repos.length} repositories of @{ghUser} --</option>
-                    {repos.map((repo) => (
+                    <option value="">
+                      {repoSearchFilter.trim()
+                        ? `-- ${filteredRepos.length} of ${repos.length} repositories match --`
+                        : `-- Choose from ${repos.length} repositories of @${ghUser} --`}
+                    </option>
+                    {filteredRepos.map((repo) => (
                       <option key={repo.id} value={repo.html_url}>
                         {repo.name} {repo.language ? `[${repo.language}]` : ""} {repo.stargazers_count > 0 ? `(⭐${repo.stargazers_count})` : ""}
                       </option>
