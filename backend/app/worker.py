@@ -20,6 +20,7 @@ from .security import decrypt_secret, internal_api_token
 from .workspace import UnifiedWorkspace, get_docker_client, reap_orphaned_containers, reap_orphaned_volumes
 from .github_client import create_draft_pr
 from .llm import LLMChatSession
+from .branches import validate_task_branch
 from .agent import SYSTEM_INSTRUCTION, initial_prompt, run_agent_commands
 from .events import event_bus
 from .logging_config import configure_logging, task_id_var
@@ -162,7 +163,28 @@ async def _execute_agent_task(
                     elif c.provider == "openrouter" and decrypted:
                         user_openrouter_key = decrypted
 
-        final_github_token = user_github_token or secret_value(settings.GITHUB_TOKEN)
+        # Only the task owner's own GitHub credentials are ever used; there is no server-token fallback
+        final_github_token = user_github_token
+
+        # Re-checked here for tasks queued before the API enforced these rules
+        refusal = None
+        if repo_url and user is None:
+            refusal = ("anonymous_repo_task", "Sign in with GitHub to run tasks against a repository.")
+        else:
+            try:
+                branch_name = validate_task_branch(git_branch) or branch_name
+            except ValueError as e:
+                refusal = ("invalid_branch", str(e))
+        if refusal:
+            reason, message = refusal
+            logger.warning("Refusing task", extra={"event": "task_refused", "reason": reason})
+            stats.update(status="failed", reason=reason)
+            task.status = TaskStatus.FAILED
+            await db.commit()
+            await log_event(db, task_id, EventType.LOG, {"message": message})
+            await log_event(db, task_id, EventType.STATUS, {"status": "failed"})
+            return
+
         has_any_llm_key = bool(
             user_gemini_key or user_groq_key or user_openrouter_key or
             settings.GEMINI_API_KEY or settings.GROQ_API_KEY or settings.OPENROUTER_API_KEY

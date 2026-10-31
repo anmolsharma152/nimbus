@@ -12,7 +12,6 @@ SECRET_FIELDS = (
     "GEMINI_API_KEY",
     "GROQ_API_KEY",
     "OPENROUTER_API_KEY",
-    "GITHUB_TOKEN",
     "GITHUB_CLIENT_SECRET",
     "JWT_SECRET_KEY",
 )
@@ -26,7 +25,6 @@ def _canary_settings() -> Settings:
         GEMINI_API_KEY=CANARY,
         GROQ_API_KEY=CANARY,
         OPENROUTER_API_KEY=CANARY,
-        GITHUB_TOKEN=CANARY,
         GITHUB_CLIENT_SECRET=CANARY,
         JWT_SECRET_KEY=CANARY,
     )

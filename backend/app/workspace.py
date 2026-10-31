@@ -188,7 +188,10 @@ def push_script(
         f"git checkout -q -b {q(branch_name)} FETCH_HEAD",
         f"git apply --index {q(patch_path)}",
         f"git -c user.name={q(author_name)} -c user.email={q(author_email)} commit -q -m {q(message)}",
-        f"git push -q origin {q(branch_name)}",
+        # Empty lease value = the branch must not exist yet, so a task can never overwrite or
+        # fast-forward an existing branch (the repo's default branch included)
+        f"git push -q --force-with-lease={q('refs/heads/' + branch_name + ':')} origin "
+        f"{q('HEAD:refs/heads/' + branch_name)}",
     ])
 
 

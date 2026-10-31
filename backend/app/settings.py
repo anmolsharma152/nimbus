@@ -46,10 +46,6 @@ class Settings(BaseSettings):
         default="cohere/north-mini-code:free",
         description="OpenRouter free model identifier (Tier 3)."
     )
-    GITHUB_TOKEN: SecretStr | None = Field(
-        default=None,
-        description="GitHub personal access token for cloning and PR creation."
-    )
     GITHUB_CLIENT_ID: str | None = Field(
         default=None,
         description="GitHub OAuth App Client ID."
@@ -92,6 +88,10 @@ class Settings(BaseSettings):
     WORKSPACE_IMAGE: str = Field(
         default="nimbus-workspace:latest",
         description="Agent sandbox image built from backend/Dockerfile.workspace (Docker mode only)."
+    )
+    ANON_TASKS_PER_HOUR: int = Field(
+        default=10,
+        description="Tasks per hour shared by all signed-out visitors (repo tasks always need sign-in)."
     )
     TASK_TIMEOUT_SECONDS: float = Field(
         default=1800,

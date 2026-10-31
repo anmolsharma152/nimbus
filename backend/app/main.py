@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import text
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, Dict
 import json
 import asyncio
@@ -29,6 +29,7 @@ from .security import (
     STREAM_TICKET_TTL,
 )
 from .ratelimit import check_task_submission_limits
+from .branches import validate_task_branch
 from .settings import settings
 from .logging_config import configure_logging, new_request_id, request_id_var
 
@@ -146,6 +147,19 @@ class TaskCreate(BaseModel):
     repo_url: Optional[str] = None
     git_branch: Optional[str] = None
 
+    @field_validator("repo_url")
+    @classmethod
+    def _blank_repo_is_none(cls, v: Optional[str]) -> Optional[str]:
+        return v.strip() or None if v else None
+
+    @field_validator("git_branch")
+    @classmethod
+    def _check_branch(cls, v: Optional[str]) -> Optional[str]:
+        return validate_task_branch(v)
+
+
+SIGN_IN_FOR_REPO_TASKS = "Sign in with GitHub to run tasks against a repository."
+
 class TaskCreateResponse(BaseModel):
     id: int
     status: str
@@ -230,6 +244,10 @@ async def create_task(
     user: Optional[User] = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db)
 ):
+    # Repo tasks clone and push with the user's own GitHub credentials, never a server token
+    if req.repo_url and user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=SIGN_IN_FOR_REPO_TASKS)
+
     # Enforce concurrency quotas and rate limits
     await check_task_submission_limits(user, db)
 
@@ -442,6 +460,11 @@ async def retry_task(
     
     if task.user_id is not None and (user is None or task.user_id != user.id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    # Anonymous repo tasks created before sign-in was required cannot be re-run
+    if task.repo_url and task.user_id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=SIGN_IN_FOR_REPO_TASKS)
+    if task.user_id is None:
+        await check_task_submission_limits(None, db)
     
     # Reset task state for fresh execution
     task.status = TaskStatus.PENDING

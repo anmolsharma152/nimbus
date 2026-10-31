@@ -28,9 +28,14 @@ async def test_create_task_endpoint():
             }
             # We override get_db dependency
             from app.db import get_db
+            from app.auth import get_optional_user
+            from app.models import User
             app.dependency_overrides[get_db] = lambda: mock_db
+            # Repo tasks require sign-in
+            app.dependency_overrides[get_optional_user] = lambda: User(id=7, username="dev", tier="free")
 
-            response = await ac.post("/api/tasks", json=payload)
+            with patch("app.main.check_task_submission_limits", new_callable=AsyncMock):
+                response = await ac.post("/api/tasks", json=payload)
             app.dependency_overrides.clear()
 
             assert response.status_code == 200

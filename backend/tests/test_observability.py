@@ -138,7 +138,7 @@ async def test_worker_logs_task_context_and_one_summary_per_task():
     db.get = AsyncMock(return_value=task)
     db.add = MagicMock()
     ws = MagicMock()
-    ws.asetup = AsyncMock(return_value=(128, "Failed to clone repository"))
+    ws.asetup = AsyncMock(return_value=(128, "Failed to set up workspace"))
     ws.acleanup = AsyncMock()
 
     handler = _Collect()
@@ -151,7 +151,7 @@ async def test_worker_logs_task_context_and_one_summary_per_task():
              patch("app.worker.UnifiedWorkspace", return_value=ws), \
              patch("app.worker.log_event", new_callable=AsyncMock):
             mock_session_ctx.return_value.__aenter__.return_value = db
-            await run_agent_loop(ctx={}, task_id=5, prompt="secret prompt text", repo_url="https://github.com/o/r")
+            await run_agent_loop(ctx={}, task_id=5, prompt="secret prompt text")
     finally:
         worker_logger.removeHandler(handler)
 

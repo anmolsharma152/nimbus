@@ -9,6 +9,7 @@ from sqlalchemy.future import select
 from sqlalchemy import func
 
 from .models import User, Task, TaskStatus
+from .settings import settings
 
 
 async def _extract_scalar(result) -> int:
@@ -84,4 +85,18 @@ async def check_task_submission_limits(
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Anonymous task capacity reached. Please sign in with GitHub for dedicated quota."
+            )
+
+        # Shared hourly budget for all anonymous visitors (tasks carry no per-visitor identity)
+        hourly_res = await db.execute(
+            select(func.count(Task.id)).where(
+                Task.user_id.is_(None),
+                Task.created_at >= one_hour_ago
+            )
+        )
+        hourly_count = await _extract_scalar(hourly_res)
+        if hourly_count >= settings.ANON_TASKS_PER_HOUR:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Anonymous hourly task limit reached. Please sign in with GitHub or try again later."
             )

@@ -301,3 +301,38 @@ def test_cleanup_kills_leftover_sandbox_processes():
     with patch("app.workspace._kill_uid_processes") as kill:
         ws.cleanup()
     kill.assert_called_once_with(200_007)
+
+
+def _remote_sha(bare, ref):
+    return subprocess.run(
+        ["git", "rev-parse", ref], cwd=bare, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_push_never_updates_an_existing_remote_branch(bare_remote):
+    """Even if a protected name slipped past validation, the push refuses to touch an existing branch."""
+    remote_url = f"file://{bare_remote}"
+    main_before = _remote_sha(bare_remote, "main")
+    ws = SubprocessWorkspace(task_id=4244)
+    try:
+        code, out = ws.setup(repo_url=remote_url, branch_name="nimbus/task-4244")
+        assert code == 0, out
+        ws.execute_command("echo change > new.txt")
+        ws.commit_changes("agent commit")
+
+        # Fast-forwarding main would succeed with a plain `git push`
+        code, _ = ws.push_branch("main", "https://github.com/o/r", None, remote_url=remote_url)
+        assert code != 0
+        assert _remote_sha(bare_remote, "main") == main_before
+
+        code, out = ws.push_branch("nimbus/task-4244", "https://github.com/o/r", None, remote_url=remote_url)
+        assert code == 0, out
+        # A second, different push to the now-existing branch is refused as well
+        ws.execute_command("echo more >> new.txt")
+        ws.commit_changes("agent commit 2")
+        pushed = _remote_sha(bare_remote, "nimbus/task-4244")
+        code, _ = ws.push_branch("nimbus/task-4244", "https://github.com/o/r", None, remote_url=remote_url)
+        assert code != 0
+        assert _remote_sha(bare_remote, "nimbus/task-4244") == pushed
+    finally:
+        ws.cleanup()
