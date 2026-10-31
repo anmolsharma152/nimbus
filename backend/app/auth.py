@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from typing import Optional, Dict, Any
+from typing import Optional
 
 from .db import get_db
 from .models import User
@@ -16,8 +16,7 @@ from .settings import settings, secret_value, cookie_secure
 from .security import (
     create_access_token,
     decode_access_token,
-    encrypt_secret,
-    decrypt_secret
+    encrypt_secret
 )
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])

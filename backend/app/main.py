@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import text
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict
 import json
 import asyncio
 import datetime
@@ -19,7 +19,7 @@ from .db import get_db, engine, Base, async_session
 from .events import event_bus
 from .models import User, Task, TaskEvent, TaskStatus, EventType
 from .worker import enqueue_task
-from .auth import router as auth_router, get_current_user, get_optional_user, decode_access_token
+from .auth import router as auth_router, get_optional_user, decode_access_token
 from .credentials import router as credentials_router, user_router
 from .security import (
     decrypt_secret,

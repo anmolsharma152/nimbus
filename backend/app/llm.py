@@ -5,7 +5,6 @@ Tier 2: Groq (openai/gpt-oss-120b) via OpenAI-compatible REST endpoint
 Tier 3: OpenRouter (google/gemma-4-31b-it:free) via OpenAI-compatible REST endpoint
 """
 
-import json
 import asyncio
 import logging
 import time

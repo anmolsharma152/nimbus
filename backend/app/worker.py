@@ -9,8 +9,6 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from arq.cron import cron
 from sqlalchemy.ext.asyncio import AsyncSession
-from google import genai
-from google.genai import types
 
 from sqlalchemy.future import select
 import shlex

@@ -1,7 +1,6 @@
 """Distributed Redis Event Bus for real-time task log/command fan-out across API replicas."""
 
 import json
-import asyncio
 import logging
 from typing import Optional, Dict, Any, AsyncGenerator
 import redis.asyncio as redis

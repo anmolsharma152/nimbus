@@ -34,8 +34,30 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+extend-exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+# Correctness gate for CI: pyflakes (unused/undefined names) and syntax errors.
+# Style rules (E/W, isort) are not enforced yet; the codebase predates them.
+select = ["F", "E9"]
+
+[tool.ruff.lint.per-file-ignores]
+# Models are imported so Alembic autogenerate sees their tables
+"alembic/env.py" = ["F401"]
+
+[tool.coverage.run]
+source = ["app"]
+
+[tool.coverage.report]
+skip_empty = true
+fail_under = 78  # CI floor; raise it as coverage grows

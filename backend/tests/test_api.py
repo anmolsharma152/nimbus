@@ -3,8 +3,8 @@ from unittest.mock import AsyncMock, patch, MagicMock
 import httpx
 from httpx import ASGITransport
 
-from app.main import app, manager
-from app.models import Task, TaskStatus, EventType
+from app.main import app
+from app.models import Task, TaskStatus
 
 
 @pytest.mark.asyncio
