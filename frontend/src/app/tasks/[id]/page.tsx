@@ -4,8 +4,19 @@ import { useEffect, useState, useRef, use } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import styles from "./task.module.css";
+import {
+  isTerminalStatus,
+  lastEventId,
+  mergeEvents,
+  reconnectDelay,
+  STREAM_REJECTED_CODE,
+  parsePayload,
+  streamUrl,
+} from "@/lib/taskStream";
+import { API_BASE, WS_BASE } from "@/lib/api";
 
 interface EventPayload {
+  id?: number | null;
   type: string;
   payload: string | { message?: string; status?: string; command?: string; output?: string };
   timestamp: string;
@@ -43,14 +54,24 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
   const [copied, setCopied] = useState(false);
   const [followupText, setFollowupText] = useState("");
   const [isSendingFollowup, setIsSendingFollowup] = useState(false);
+  const [followupError, setFollowupError] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
 
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
-  const wsBase = process.env.NEXT_PUBLIC_WS_URL || apiBase.replace(/^http/, "ws");
+  const apiBase = API_BASE;
+  const wsBase = WS_BASE;
 
-  // 1. Fetch initial task details, historical events & screenshots
+  const isTerminal = isTerminalStatus(task?.status);
+  // Live stream health and resume cursor, read by the poller and reconnect logic
+  const wsOpenRef = useRef(false);
+  const lastEventIdRef = useRef(0);
+
+  useEffect(() => {
+    lastEventIdRef.current = lastEventId(events);
+  }, [events]);
+
+  // 1. Fetch task details, events & screenshots; poll only while the live stream is down
   useEffect(() => {
     const fetchTask = () => {
       fetch(`${apiBase}/api/tasks/${id}`, { credentials: "include" })
@@ -67,7 +88,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
         .then((res) => (res.ok ? res.json() : []))
         .then((data) => {
           if (Array.isArray(data) && data.length > 0) {
-            setEvents((prev) => (data.length !== prev.length ? data : prev));
+            setEvents((prev) => mergeEvents(prev, data));
           }
         })
         .catch((err) => console.error("Failed to fetch task events", err));
@@ -88,78 +109,137 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
     fetchEvents();
     fetchScreenshots();
 
-    // Active polling reconciler while task is running/pending
+    // A finished task won't change any more: one final fetch above, no polling
+    if (isTerminal) return;
+
     const poller = setInterval(() => {
+      if (wsOpenRef.current) return;
       fetchEvents();
       fetchTask();
       fetchScreenshots();
-    }, 1500);
+    }, 3000);
 
     return () => clearInterval(poller);
-  }, [id, apiBase]);
+  }, [id, apiBase, isTerminal]);
 
-  // 2. Connect WebSocket for sub-second instant streaming
+  // 2. Live WebSocket stream with backoff reconnect and resume-from-last-event
   useEffect(() => {
-    let ws: WebSocket | null = null;
-    let reconnectTimeout: any = null;
+    if (isTerminal) return;
 
-    const connectWS = () => {
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+    let disposed = false;
+
+    const scheduleReconnect = () => {
+      if (disposed) return;
+      reconnectTimer = setTimeout(connect, reconnectDelay(attempt++));
+    };
+
+    const handleMessage = (event: MessageEvent) => {
       try {
-        ws = new WebSocket(`${wsBase}/ws/tasks/${id}`);
-        
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            if (data.type === "status") {
-              const parsed = typeof data.payload === "string" ? JSON.parse(data.payload) : data.payload;
-              setTask((prev) => prev ? { ...prev, status: parsed.status } : null);
-              if (parsed.status === "completed" || parsed.status === "failed") {
-                fetch(`${apiBase}/api/tasks/${id}`, { credentials: "include" })
-                  .then((res) => res.json())
-                  .then((d) => setTask(d))
-                  .catch(() => {});
-              }
-            }
-            
-            // Check for real-time screenshot payload
-            try {
-              const parsedPayload = typeof data.payload === "string" ? JSON.parse(data.payload) : data.payload;
-              if (parsedPayload && parsedPayload.screenshot) {
-                setScreenshots((prev) => [
+        const data = JSON.parse(event.data);
+        const parsedPayload = parsePayload(data.payload);
+
+        const newStatus = parsedPayload.status;
+        if (data.type === "status" && newStatus) {
+          setTask((prev) => (prev ? { ...prev, status: newStatus } : null));
+          if (isTerminalStatus(newStatus)) {
+            // Pick up the final diff / PR link; this effect then closes the stream
+            fetch(`${apiBase}/api/tasks/${id}`, { credentials: "include" })
+              .then((res) => res.json())
+              .then((d) => setTask(d))
+              .catch(() => {});
+          }
+        }
+
+        const screenshotData = parsedPayload.screenshot;
+        if (screenshotData) {
+          const screenshotId = typeof data.id === "number" ? data.id : Date.now();
+          setScreenshots((prev) =>
+            prev.some((s) => s.id === screenshotId)
+              ? prev
+              : [
                   ...prev,
                   {
-                    id: Date.now(),
+                    id: screenshotId,
                     task_id: Number(id),
                     filename: parsedPayload.filename || "screenshot.png",
                     caption: parsedPayload.caption || "Live visual capture",
-                    data: parsedPayload.screenshot,
+                    data: screenshotData,
                     created_at: new Date().toISOString(),
                   },
-                ]);
-              }
-            } catch {}
+                ]
+          );
+        }
 
-            setEvents((prev) => [...prev, data]);
-          } catch (err) {
-            console.error("Failed to parse WS message", err);
-          }
-        };
-
-        ws.onclose = () => {
-          reconnectTimeout = setTimeout(connectWS, 3000);
-        };
-      } catch (wsErr) {
-        console.warn("WebSocket connection notice:", wsErr);
+        setEvents((prev) => mergeEvents(prev, [data]));
+      } catch (err) {
+        console.error("Failed to parse WS message", err);
       }
     };
 
-    connectWS();
+    async function connect() {
+      if (disposed) return;
+      // The socket goes straight to the backend, which can't see our cookie: fetch a fresh ticket per attempt
+      let ticket: string | null = null;
+      try {
+        const res = await fetch(`${apiBase}/api/tasks/${id}/stream-ticket`, {
+          method: "POST",
+          credentials: "include",
+        });
+        if (res.status === 401 || res.status === 404) {
+          console.warn("Task stream not available:", res.status);
+          return;
+        }
+        if (!res.ok) throw new Error(`stream ticket request failed (${res.status})`);
+        ticket = (await res.json()).ticket ?? null;
+      } catch (ticketErr) {
+        console.warn("Stream ticket notice:", ticketErr);
+        scheduleReconnect();
+        return;
+      }
+      if (disposed) return;
+
+      const after = lastEventIdRef.current;
+      let socket: WebSocket;
+      try {
+        socket = new WebSocket(streamUrl(wsBase, id, after, ticket));
+      } catch (wsErr) {
+        console.warn("WebSocket connection notice:", wsErr);
+        scheduleReconnect();
+        return;
+      }
+      ws = socket;
+      socket.onopen = () => {
+        attempt = 0;
+        wsOpenRef.current = true;
+      };
+      socket.onmessage = handleMessage;
+      socket.onclose = (event) => {
+        wsOpenRef.current = false;
+        if (event.code === STREAM_REJECTED_CODE) {
+          // Not found / not authorized: retrying can't succeed; the poller keeps the page current
+          console.warn("Task stream rejected:", event.reason);
+          return;
+        }
+        scheduleReconnect();
+      };
+    }
+
+    connect();
 
     return () => {
-      if (reconnectTimeout) clearTimeout(reconnectTimeout);
-      if (ws) ws.close();
+      disposed = true;
+      wsOpenRef.current = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) {
+        // Detach first so closing here doesn't schedule a reconnect after unmount
+        ws.onclose = null;
+        ws.close();
+      }
     };
-  }, [id, apiBase, wsBase]);
+  }, [id, apiBase, wsBase, isTerminal]);
 
   // Auto-scroll to bottom of events
   useEffect(() => {
@@ -171,12 +251,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
   const handleCopyLogs = () => {
     const logText = events
       .map((ev) => {
-        let parsed: any = {};
-        try {
-          parsed = typeof ev.payload === "string" ? JSON.parse(ev.payload) : ev.payload;
-        } catch {
-          parsed = { message: String(ev.payload) };
-        }
+        const parsed = parsePayload(ev.payload);
         const time = new Date(ev.timestamp).toLocaleTimeString();
         if (ev.type === "command") return `[${time}] $ ${parsed.command}`;
         if (ev.type === "result") return parsed.output;
@@ -228,26 +303,34 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
     e.preventDefault();
     if (!followupText.trim() || isSendingFollowup) return;
     setIsSendingFollowup(true);
+    setFollowupError(null);
 
     try {
-      // Launch a new follow-up task targeting the same repo & context
-      const newPrompt = `Follow-up on Task #${id}:\nOriginal Goal: ${task?.prompt}\n\nAdditional Directive: ${followupText.trim()}`;
-      const res = await fetch(`${apiBase}/api/tasks`, {
+      // Continues this task: same branch and PR, building on the changes made so far
+      const res = await fetch(`${apiBase}/api/tasks/${id}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({
-          prompt: newPrompt,
-          repo_url: task?.repo_url || null,
-        }),
+        body: JSON.stringify({ message: followupText.trim() }),
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        router.push(`/tasks/${data.id}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        const detail = typeof body?.detail === "string" ? body.detail : `Request failed (${res.status})`;
+        setFollowupError(detail);
+        return;
       }
+      setFollowupText("");
+      setTask((prev) => (prev ? { ...prev, status: "pending" } : null));
+      fetch(`${apiBase}/api/tasks/${id}/events`, { credentials: "include" })
+        .then((r) => (r.ok ? r.json() : []))
+        .then((data) => {
+          if (Array.isArray(data)) setEvents(data);
+        })
+        .catch(() => {});
     } catch (err) {
-      console.error("Failed to send follow-up prompt", err);
+      console.error("Failed to send follow-up", err);
+      setFollowupError("Could not reach the server. Please try again.");
     } finally {
       setIsSendingFollowup(false);
     }
@@ -420,10 +503,16 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
               <button
                 type="submit"
                 className={styles.followupBtn}
-                disabled={!followupText.trim() || isSendingFollowup}
+                disabled={!followupText.trim() || isSendingFollowup || isStopable}
+                title={isStopable ? "Wait for the current run to finish" : undefined}
               >
                 {isSendingFollowup ? "Dispatching..." : "Send Follow-Up Directives ➔"}
               </button>
+              {followupError && (
+                <p className={styles.followupError} role="alert">
+                  {followupError}
+                </p>
+              )}
             </form>
           </div>
 
@@ -543,12 +632,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
                   </div>
                 )}
                 {events.map((ev, idx) => {
-                  let parsed: any = {};
-                  try {
-                    parsed = typeof ev.payload === "string" ? JSON.parse(ev.payload) : ev.payload;
-                  } catch {
-                    parsed = { message: String(ev.payload) };
-                  }
+                  const parsed = parsePayload(ev.payload);
 
                   const evType = (ev.type || "").toLowerCase();
                   if (evType === "log" || evType === "status") {

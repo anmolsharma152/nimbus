@@ -10,7 +10,7 @@ import datetime
 from .db import get_db
 from .models import User, UserCredential
 from .auth import get_current_user
-from .security import encrypt_secret, decrypt_secret
+from .security import encrypt_secret
 
 router = APIRouter(prefix="/api/settings/credentials", tags=["credentials"])
 

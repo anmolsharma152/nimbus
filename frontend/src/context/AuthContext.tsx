@@ -1,6 +1,7 @@
 "use client";
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
+import { API_BASE } from "@/lib/api";
 
 export interface UserProfile {
   id: number;
@@ -30,36 +31,42 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
+  const apiBase = API_BASE;
 
-  const refreshUser = useCallback(async () => {
+  // Resolves to the signed-in user, or null; never rejects
+  const loadUser = useCallback(async (): Promise<UserProfile | null> => {
     try {
       const res = await fetch(`${apiBase}/api/auth/me`, {
         credentials: "include", // send HTTP-only session cookie
       });
-
-      if (res.ok) {
-        const data = await res.json();
-        if (data.authenticated && data.user) {
-          setUser(data.user);
-          return;
-        }
-      }
-      setUser(null);
+      const data = res.ok ? await res.json() : null;
+      return data?.authenticated && data.user ? data.user : null;
     } catch (err) {
       console.warn("Auth status check:", err);
-      setUser(null);
-    } finally {
-      setIsLoading(false);
+      return null;
     }
   }, [apiBase]);
 
+  const refreshUser = useCallback(async () => {
+    setUser(await loadUser());
+    setIsLoading(false);
+  }, [loadUser]);
+
   useEffect(() => {
-    refreshUser();
-  }, [refreshUser]);
+    let active = true;
+    loadUser().then((profile) => {
+      if (!active) return;
+      setUser(profile);
+      setIsLoading(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, [loadUser]);
 
   const login = () => {
-    // Redirect to backend GitHub OAuth consent screen
+    // Full navigation: /api/* is proxied to the backend, which redirects to GitHub (not a Next page)
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination
     window.location.href = `${apiBase}/api/auth/github/login`;
   };
 
@@ -73,6 +80,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       console.warn("Logout error:", err);
     } finally {
       setUser(null);
+      // Full reload on purpose: drops all client state from the signed-in session
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination
       window.location.href = "/";
     }
   };

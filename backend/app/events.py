@@ -1,10 +1,12 @@
 """Distributed Redis Event Bus for real-time task log/command fan-out across API replicas."""
 
 import json
-import asyncio
+import logging
 from typing import Optional, Dict, Any, AsyncGenerator
 import redis.asyncio as redis
-from .settings import settings
+from .settings import settings, secret_value
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_redis_url(url: Optional[str]) -> str:
@@ -32,7 +34,7 @@ class RedisEventBus:
 
     def _get_redis(self) -> redis.Redis:
         if self._redis is None:
-            clean_url = normalize_redis_url(settings.REDIS_URL)
+            clean_url = normalize_redis_url(secret_value(settings.REDIS_URL))
             self._redis = redis.from_url(
                 clean_url,
                 encoding="utf-8",
@@ -42,12 +44,20 @@ class RedisEventBus:
             )
         return self._redis
 
-    async def publish_event(self, task_id: int, event_type: str, payload_dict: Dict[str, Any], timestamp: Optional[str] = None):
+    async def publish_event(
+        self,
+        task_id: int,
+        event_type: str,
+        payload_dict: Dict[str, Any],
+        timestamp: Optional[str] = None,
+        event_id: Optional[int] = None
+    ):
         """
         Publishes a flight event to Redis Pub/Sub channel and appends to the task's Redis Stream.
         """
         event_data = {
             "task_id": task_id,
+            "id": event_id,
             "type": event_type,
             "payload": json.dumps(payload_dict) if isinstance(payload_dict, dict) else str(payload_dict),
             "timestamp": timestamp or ""
@@ -65,7 +75,7 @@ class RedisEventBus:
             # 2. Append to persistent Redis stream (capped to last 500 events)
             await r.xadd(stream_name, {"event": json_str}, maxlen=500, approximate=True)
         except Exception as e:
-            print(f"[RedisEventBus] Notice: Failed to publish to Redis ({e})")
+            logger.warning("Failed to publish task %s event to Redis: %s", task_id, e)
 
     async def subscribe_task(self, task_id: int) -> AsyncGenerator[Dict[str, Any], None]:
         """
@@ -87,6 +97,29 @@ class RedisEventBus:
         finally:
             await pubsub.unsubscribe(channel_name)
             await pubsub.close()
+
+    async def subscribe_all(self) -> AsyncGenerator[Dict[str, Any], None]:
+        """Yields events for every task (one pattern subscription per API process).
+
+        Polls with an explicit timeout instead of `listen()`, so quiet periods don't trip
+        socket_timeout; a dropped connection raises and the caller reconnects.
+        """
+        pubsub = self._get_redis().pubsub()
+        await pubsub.psubscribe("nimbus:events:task:*")
+        try:
+            while True:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if not message or message.get("type") != "pmessage":
+                    continue
+                try:
+                    yield json.loads(message["data"])
+                except (TypeError, ValueError):
+                    continue
+        finally:
+            try:
+                await pubsub.punsubscribe()
+            finally:
+                await pubsub.aclose()
 
     async def close(self):
         """Gracefully closes Redis connection pool."""

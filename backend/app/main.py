@@ -1,26 +1,42 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Request, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Request, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import text
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, field_validator
+from typing import Optional, Dict
 import json
 import asyncio
 import datetime
-import traceback
+import logging
+import time
 import httpx
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 
-from .db import get_db, engine, Base
-from .models import User, Task, TaskEvent, TaskStatus, EventType
+from .db import get_db, engine, Base, async_session
+from .events import event_bus
+from .models import User, Task, TaskEvent, TaskMessage, TaskStatus, EventType
 from .worker import enqueue_task
-from .auth import router as auth_router, get_current_user, get_optional_user, decode_access_token
+from .auth import router as auth_router, get_optional_user, decode_access_token
 from .credentials import router as credentials_router, user_router
-from .security import decrypt_secret
+from .security import (
+    decrypt_secret,
+    verify_internal_api_token,
+    create_stream_ticket,
+    verify_stream_ticket,
+    STREAM_TICKET_TTL,
+)
 from .ratelimit import check_task_submission_limits
+from .branches import validate_task_branch
 from .settings import settings
+from .logging_config import configure_logging, new_request_id, request_id_var
+
+configure_logging()
+logger = logging.getLogger(__name__)
+
+HEALTH_PATHS = {"/", "/healthz", "/api/health"}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -38,11 +54,24 @@ async def lifespan(app: FastAPI):
                     await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS git_branch VARCHAR;"))
                     await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS pr_url VARCHAR;"))
                     await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS patch_diff TEXT;"))
+                    await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS base_sha VARCHAR(40);"))
+                    await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS pushed_sha VARCHAR(40);"))
+                    await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS head_repo VARCHAR;"))
                 except Exception as alter_err:
-                    print(f"Column migration check note: {alter_err}")
+                    logger.warning("Column migration check failed: %s", alter_err)
     except Exception as e:
-        print(f"Database schema initialization notice: {e}")
-    yield
+        logger.warning("Database schema initialization failed: %s", e)
+
+    relay_task = asyncio.create_task(relay_redis_events())
+    try:
+        yield
+    finally:
+        relay_task.cancel()
+        try:
+            await relay_task
+        except asyncio.CancelledError:
+            pass
+        await event_bus.close()
 
 app = FastAPI(title="Nimbus Control Plane", lifespan=lifespan)
 
@@ -64,13 +93,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    """Tags every log line of a request with its id and logs one access line with timing."""
+    request_id = new_request_id(request.headers.get("X-Request-ID"))
+    request.state.request_id = request_id
+    token = request_id_var.set(request_id)
+    start = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        logger.log(
+            logging.DEBUG if request.url.path in HEALTH_PATHS else logging.INFO,
+            "%s %s -> %s", request.method, request.url.path, status_code,
+            extra={
+                "event": "http_request",
+                "method": request.method,
+                "path": request.url.path,
+                "status": status_code,
+                "duration_ms": round((time.perf_counter() - start) * 1000, 1),
+            }
+        )
+        request_id_var.reset(token)
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    err_trace = traceback.format_exc()
-    print(f"[Unhandled Server Error on {request.url.path}]: {err_trace}")
+    # Full details go to the logs only; clients get an id to quote, never a traceback
+    request_id = getattr(request.state, "request_id", None) or new_request_id()
+    logger.error(
+        "Unhandled error on %s %s", request.method, request.url.path,
+        exc_info=exc, extra={"event": "unhandled_error", "request_id": request_id}
+    )
     return JSONResponse(
         status_code=500,
-        content={"detail": str(exc), "trace": err_trace[:500]}
+        content={"detail": "Internal server error", "request_id": request_id},
+        headers={"X-Request-ID": request_id}
     )
 
 @app.api_route("/", methods=["GET", "HEAD"])
@@ -88,6 +149,19 @@ class TaskCreate(BaseModel):
     prompt: str
     repo_url: Optional[str] = None
     git_branch: Optional[str] = None
+
+    @field_validator("repo_url")
+    @classmethod
+    def _blank_repo_is_none(cls, v: Optional[str]) -> Optional[str]:
+        return v.strip() or None if v else None
+
+    @field_validator("git_branch")
+    @classmethod
+    def _check_branch(cls, v: Optional[str]) -> Optional[str]:
+        return validate_task_branch(v)
+
+
+SIGN_IN_FOR_REPO_TASKS = "Sign in with GitHub to run tasks against a repository."
 
 class TaskCreateResponse(BaseModel):
     id: int
@@ -164,7 +238,7 @@ async def list_user_repositories(
                     ]
             return []
     except Exception as e:
-        print(f"Failed to fetch repositories from GitHub: {e}")
+        logger.warning("Failed to fetch repositories from GitHub: %s", e)
         return []
 
 @app.post("/api/tasks", response_model=TaskCreateResponse)
@@ -173,6 +247,10 @@ async def create_task(
     user: Optional[User] = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db)
 ):
+    # Repo tasks clone and push with the user's own GitHub credentials, never a server token
+    if req.repo_url and user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=SIGN_IN_FOR_REPO_TASKS)
+
     # Enforce concurrency quotas and rate limits
     await check_task_submission_limits(user, db)
 
@@ -196,7 +274,7 @@ async def create_task(
         try:
             await enqueue_task(task_id, req.prompt, req.repo_url, req.git_branch)
         except Exception as queue_err:
-            print(f"Failed to enqueue task {task_id} into Redis: {queue_err}")
+            logger.error("Failed to enqueue task %s: %s", task_id, queue_err)
         
         status_val = str(task.status.value).lower() if hasattr(task.status, "value") else str(task.status or "pending").lower()
         return TaskCreateResponse(
@@ -209,7 +287,7 @@ async def create_task(
     except Exception as e:
         await db.rollback()
         err_msg = f"Task creation failed in DB: {e}"
-        print(f"Error in create_task: {traceback.format_exc()}")
+        logger.exception("Task creation failed")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=err_msg)
 
 @app.get("/api/tasks", response_model=list[TaskResponse])
@@ -221,6 +299,8 @@ async def list_tasks(
     query = select(Task)
     if user:
         query = query.where(Task.user_id == user.id)
+    else:
+        query = query.where(Task.user_id.is_(None))
     query = query.order_by(Task.created_at.desc()).limit(limit)
     result = await db.execute(query)
     tasks = result.scalars().all()
@@ -237,6 +317,27 @@ async def list_tasks(
         )
         for t in tasks
     ]
+
+class StreamTicketResponse(BaseModel):
+    ticket: Optional[str]
+    expires_in: int
+
+
+@app.post("/api/tasks/{task_id}/stream-ticket", response_model=StreamTicketResponse)
+async def create_task_stream_ticket(
+    task_id: int,
+    user: Optional[User] = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Issues a short-lived ticket for the task's WebSocket, which can't see the frontend's cookie."""
+    task = await db.get(Task, task_id)
+    if not task or (task.user_id is not None and (user is None or task.user_id != user.id)):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    ttl = int(STREAM_TICKET_TTL.total_seconds())
+    if task.user_id is None:
+        return StreamTicketResponse(ticket=None, expires_in=ttl)  # anonymous tasks need no ticket
+    return StreamTicketResponse(ticket=create_stream_ticket(user.id, task_id), expires_in=ttl)
+
 
 @app.get("/api/tasks/{task_id}", response_model=TaskResponse)
 async def get_task(
@@ -278,17 +379,9 @@ async def get_task_events(
     if task.user_id is not None and (user is None or task.user_id != user.id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
 
-    result = await db.execute(select(TaskEvent).where(TaskEvent.task_id == task_id).order_by(TaskEvent.created_at))
+    result = await db.execute(select(TaskEvent).where(TaskEvent.task_id == task_id).order_by(TaskEvent.id))
     events = result.scalars().all()
-    return [
-        {
-            "id": ev.id,
-            "type": str(ev.event_type.value).lower() if hasattr(ev.event_type, "value") else str(ev.event_type).lower(),
-            "payload": ev.payload,
-            "timestamp": ev.created_at.isoformat() + "Z"
-        }
-        for ev in events
-    ]
+    return [_event_message(ev) for ev in events]
 
 @app.get("/api/tasks/{task_id}/screenshots")
 async def get_task_screenshots(
@@ -357,47 +450,92 @@ async def cancel_task(
     
     return TaskCancelResponse(id=task.id, status="cancelled", message="Task cancelled successfully")
 
+async def _load_rerunnable_task(task_id: int, user: Optional[User], db: AsyncSession) -> Task:
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    if task.user_id is not None and (user is None or task.user_id != user.id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    # Anonymous repo tasks created before sign-in was required cannot be re-run
+    if task.repo_url and task.user_id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=SIGN_IN_FOR_REPO_TASKS)
+    return task
+
+
+async def _requeue(task: Task, db: AsyncSession, log_message: str):
+    task.status = TaskStatus.PENDING
+    await db.commit()
+
+    db.add(TaskEvent(
+        task_id=task.id,
+        event_type=EventType.LOG,
+        payload=json.dumps({"message": log_message})
+    ))
+    await db.commit()
+
+    await manager.broadcast_event(task.id, {
+        "type": "status",
+        "payload": json.dumps({"status": "pending"}),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    })
+    await enqueue_task(task.id, task.prompt, task.repo_url, task.git_branch)
+
+
 @app.post("/api/tasks/{task_id}/retry")
 async def retry_task(
     task_id: int,
     user: Optional[User] = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db)
 ):
-    result = await db.execute(select(Task).where(Task.id == task_id))
-    task = result.scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
-    
-    if task.user_id is not None and (user is None or task.user_id != user.id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
-    
-    # Reset task state for fresh execution
-    task.status = TaskStatus.PENDING
+    """Starts the task over from a fresh checkout, with the original prompt and every follow-up.
+
+    The branch, PR and last pushed commit are kept, so the new result replaces the old one on the
+    same branch and PR instead of failing on an existing branch.
+    """
+    task = await _load_rerunnable_task(task_id, user, db)
+    if task.user_id is None:
+        await check_task_submission_limits(None, db)
+
     task.patch_diff = None
-    task.pr_url = None
-    await db.commit()
-    
-    # Log restart event
-    retry_event = TaskEvent(
-        task_id=task.id,
-        event_type=EventType.LOG,
-        payload=json.dumps({"message": "🔄 Task restarted by user. Relaunching agent reasoning loop..."})
-    )
-    db.add(retry_event)
-    await db.commit()
-    
-    # Broadcast status change to live WebSockets
-    status_payload = {
-        "type": "status",
-        "payload": json.dumps({"status": "pending"}),
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
-    }
-    await manager.broadcast_event(task_id, status_payload)
-    
-    # Re-enqueue task execution
-    await enqueue_task(task.id, task.prompt, task.repo_url, task.git_branch)
-    
+    task.base_sha = None
+    await _requeue(task, db, "🔄 Task restarted by user. Relaunching agent reasoning loop...")
     return {"id": task.id, "status": "pending", "message": "Task re-queued successfully"}
+
+
+class FollowUpCreate(BaseModel):
+    message: str
+
+    @field_validator("message")
+    @classmethod
+    def _non_empty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Follow-up message is empty.")
+        if len(v) > 10_000:
+            raise ValueError("Follow-up message is longer than 10,000 characters.")
+        return v
+
+
+@app.post("/api/tasks/{task_id}/messages")
+async def send_follow_up(
+    task_id: int,
+    req: FollowUpCreate,
+    user: Optional[User] = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Continues a finished task: same task, same branch and PR, building on its current changes."""
+    task = await _load_rerunnable_task(task_id, user, db)
+    if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This task is still running. Wait for it to finish or stop it before sending a follow-up."
+        )
+    await check_task_submission_limits(user if task.user_id is not None else None, db)
+
+    db.add(TaskMessage(task_id=task.id, content=req.message))
+    await _requeue(task, db, f"💬 Follow-up: {req.message}")
+    return {"id": task.id, "status": "pending", "message": "Follow-up queued on this task"}
 
 @app.delete("/api/tasks/{task_id}")
 async def delete_task(
@@ -423,29 +561,35 @@ async def clear_all_tasks(
     db: AsyncSession = Depends(get_db)
 ):
     from sqlalchemy import delete
-    if user:
-        # Delete only tasks belonging to this user
-        user_tasks = await db.execute(select(Task.id).where(Task.user_id == user.id))
-        task_ids = user_tasks.scalars().all()
-        if task_ids:
-            await db.execute(delete(TaskEvent).where(TaskEvent.task_id.in_(task_ids)))
-            await db.execute(delete(Task).where(Task.id.in_(task_ids)))
-    else:
-        await db.execute(delete(TaskEvent))
-        await db.execute(delete(Task))
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+
+    # Delete only tasks belonging to this user
+    user_tasks = await db.execute(select(Task.id).where(Task.user_id == user.id))
+    task_ids = user_tasks.scalars().all()
+    if task_ids:
+        await db.execute(delete(TaskEvent).where(TaskEvent.task_id.in_(task_ids)))
+        await db.execute(delete(TaskMessage).where(TaskMessage.task_id.in_(task_ids)))
+        await db.execute(delete(Task).where(Task.id.in_(task_ids)))
     await db.commit()
     return {"ok": True, "message": "Tasks cleared successfully"}
 
-# Simple connection manager with leak prevention
 class ConnectionManager:
-    def __init__(self):
-        self.active_connections: dict[int, list[WebSocket]] = {}
+    """Per-process registry of live task streams.
 
-    async def connect(self, websocket: WebSocket, task_id: int):
-        await websocket.accept()
-        if task_id not in self.active_connections:
-            self.active_connections[task_id] = []
-        self.active_connections[task_id].append(websocket)
+    Events can reach a process twice (Redis pub/sub and the worker's HTTP fallback), so persisted
+    events are de-duplicated by id. A socket that errors or stalls is dropped instead of blocking
+    delivery to everyone else.
+    """
+
+    def __init__(self, send_timeout: float = 5.0, recent_ids_per_task: int = 1000):
+        self.active_connections: dict[int, list[WebSocket]] = {}
+        self.send_timeout = send_timeout
+        self.recent_ids_per_task = recent_ids_per_task
+        self._recent_ids: dict[int, "OrderedDict[int, None]"] = {}
+
+    def register(self, websocket: WebSocket, task_id: int):
+        self.active_connections.setdefault(task_id, []).append(websocket)
 
     def disconnect(self, websocket: WebSocket, task_id: int):
         if task_id in self.active_connections:
@@ -453,65 +597,122 @@ class ConnectionManager:
                 self.active_connections[task_id].remove(websocket)
             if not self.active_connections[task_id]:
                 del self.active_connections[task_id]
+                self._recent_ids.pop(task_id, None)
+
+    def _is_duplicate(self, task_id: int, event_id: Optional[int]) -> bool:
+        if event_id is None:
+            return False
+        seen = self._recent_ids.setdefault(task_id, OrderedDict())
+        if event_id in seen:
+            return True
+        seen[event_id] = None
+        if len(seen) > self.recent_ids_per_task:
+            seen.popitem(last=False)
+        return False
 
     async def broadcast_event(self, task_id: int, event_data: dict):
-        if task_id in self.active_connections:
-            for connection in self.active_connections[task_id]:
-                try:
-                    await connection.send_text(json.dumps(event_data))
-                except Exception:
-                    pass
+        if task_id not in self.active_connections:
+            return
+        if self._is_duplicate(task_id, event_data.get("id")):
+            return
+        message = json.dumps(event_data)
+        for connection in list(self.active_connections.get(task_id, [])):
+            try:
+                await asyncio.wait_for(connection.send_text(message), timeout=self.send_timeout)
+            except Exception:
+                self.disconnect(connection, task_id)
 
 manager = ConnectionManager()
+
+
+def _event_message(ev: TaskEvent) -> dict:
+    return {
+        "id": ev.id,
+        "type": str(ev.event_type.value).lower() if hasattr(ev.event_type, "value") else str(ev.event_type).lower(),
+        "payload": ev.payload,
+        "timestamp": ev.created_at.isoformat() + "Z"
+    }
+
+
+async def relay_redis_events(sleep=asyncio.sleep):
+    """Forwards worker events from Redis pub/sub to this process's sockets, reconnecting with backoff."""
+    backoff = 1
+    while True:
+        try:
+            async for data in event_bus.subscribe_all():
+                backoff = 1
+                task_id = data.get("task_id")
+                if task_id is None:
+                    continue
+                await manager.broadcast_event(
+                    int(task_id),
+                    {key: data[key] for key in ("id", "type", "payload", "timestamp") if key in data}
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("Redis event relay lost its subscription (%s); retrying in %ss", e, backoff)
+            await sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
 
 @app.websocket("/ws/tasks/{task_id}")
 async def websocket_endpoint(
     websocket: WebSocket,
     task_id: int,
-    token: Optional[str] = Query(None),
-    db: AsyncSession = Depends(get_db)
+    ticket: Optional[str] = Query(None, description="From POST /api/tasks/{id}/stream-ticket"),
+    after: Optional[int] = Query(None, description="Resume cursor: only replay events with a larger id")
 ):
-    # Verify task existence and authorization
-    result = await db.execute(select(Task).where(Task.id == task_id))
-    task = result.scalar_one_or_none()
+    # Accept before rejecting: a pre-accept close reaches browsers as 1006, hiding the 1008 auth code
+    await websocket.accept()
+
+    # Short-lived session: a long-lived stream must not pin a pooled DB connection
+    async with async_session() as db:
+        task = await db.get(Task, task_id)
     if not task:
         await websocket.close(code=1008, reason="Task not found")
         return
 
-    # If task belongs to a registered user, verify session token
     if task.user_id is not None:
-        auth_token = token or websocket.cookies.get("nimbus_session")
-        if not auth_token:
-            await websocket.close(code=1008, reason="Authentication required for this task")
-            return
-        payload = decode_access_token(auth_token)
-        if not payload or payload.get("sub") != str(task.user_id):
+        # A ticket when connecting cross-origin; the session cookie when the API is same-origin (local dev)
+        allowed_user = verify_stream_ticket(ticket, task_id)
+        if allowed_user is None:
+            cookie = websocket.cookies.get("nimbus_session")
+            payload = decode_access_token(cookie) if cookie else None
+            if payload and not payload.get("purpose"):
+                allowed_user = payload.get("sub")
+        if allowed_user != str(task.user_id):
             await websocket.close(code=1008, reason="Unauthorized access to task stream")
             return
 
-    await manager.connect(websocket, task_id)
-    
-    # Send historical events first
-    result = await db.execute(select(TaskEvent).where(TaskEvent.task_id == task_id).order_by(TaskEvent.created_at))
-    events = result.scalars().all()
-    for ev in events:
-        ev_type = str(ev.event_type.value).lower() if hasattr(ev.event_type, "value") else str(ev.event_type).lower()
-        await websocket.send_text(json.dumps({
-            "type": ev_type,
-            "payload": ev.payload,
-            "timestamp": ev.created_at.isoformat() + "Z"
-        }))
-
+    # Register before reading history so nothing published in between is missed (clients de-dupe by id)
+    manager.register(websocket, task_id)
     try:
+        async with async_session() as db:
+            query = select(TaskEvent).where(TaskEvent.task_id == task_id)
+            if after is not None:
+                query = query.where(TaskEvent.id > after)
+            result = await db.execute(query.order_by(TaskEvent.id))
+            events = result.scalars().all()
+        for ev in events:
+            await websocket.send_text(json.dumps(_event_message(ev)))
+
         while True:
-            data = await websocket.receive_text()
-            # Keep connection open
+            await websocket.receive_text()
     except WebSocketDisconnect:
+        pass
+    finally:
         manager.disconnect(websocket, task_id)
 
 # API endpoint to post a new event (called by worker or redis listener)
 @app.post("/api/internal/tasks/{task_id}/events")
-async def post_event(task_id: int, payload: dict):
+async def post_event(
+    task_id: int,
+    payload: dict,
+    x_nimbus_internal_token: Optional[str] = Header(None)
+):
+    if not verify_internal_api_token(x_nimbus_internal_token):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid internal token")
     # Broadcast real-time to active listeners
     await manager.broadcast_event(task_id, payload)
     return {"ok": True}

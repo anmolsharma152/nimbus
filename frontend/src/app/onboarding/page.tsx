@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import styles from "./onboarding.module.css";
 import { useAuth } from "../../context/AuthContext";
+import { API_BASE } from "@/lib/api";
 
 interface RepoItem {
   id: number;
@@ -28,7 +29,7 @@ export default function OnboardingPage() {
   );
   const [isLaunching, setIsLaunching] = useState(false);
 
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "https://nimbus-api-l32h.onrender.com";
+  const apiBase = API_BASE;
 
   // Fetch repositories for step 2
   useEffect(() => {

@@ -1,26 +1,28 @@
 """Authentication and GitHub OAuth 2.0 routes and dependencies."""
 
 import secrets
+from urllib.parse import urlencode
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from typing import Optional, Dict, Any
+from typing import Optional
 
 from .db import get_db
 from .models import User
-from .settings import settings
+from .settings import settings, secret_value, cookie_secure
 from .security import (
     create_access_token,
     decode_access_token,
-    encrypt_secret,
-    decrypt_secret
+    encrypt_secret
 )
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 COOKIE_NAME = "nimbus_session"
+OAUTH_STATE_COOKIE = "nimbus_oauth_state"
 
 
 async def get_current_user(
@@ -38,13 +40,6 @@ async def get_current_user(
     if not token and auth_header and auth_header.startswith("Bearer "):
         token = auth_header[7:].strip()
 
-    # Development / Testing bypass header for test suites
-    test_user_id = request.headers.get("X-Test-User-Id")
-    if test_user_id and (not settings.GITHUB_CLIENT_ID or test_user_id.isdigit()):
-        user = await db.get(User, int(test_user_id))
-        if user:
-            return user
-
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -52,7 +47,8 @@ async def get_current_user(
         )
 
     payload = decode_access_token(token)
-    if not payload or "sub" not in payload:
+    # Purpose-scoped tokens (stream tickets) are not sessions
+    if not payload or "sub" not in payload or payload.get("purpose"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired session. Please sign in again."
@@ -97,22 +93,34 @@ async def github_login(request: Request):
     state = secrets.token_urlsafe(16)
     scope = "read:user,user:email,repo"
     
-    # Compute callback URL from request or settings
-    api_base = str(request.base_url).rstrip("/")
-    redirect_uri = f"{api_base}/api/auth/github/callback"
-    
-    auth_url = (
-        f"https://github.com/login/oauth/authorize?"
-        f"client_id={settings.GITHUB_CLIENT_ID}&"
-        f"redirect_uri={redirect_uri}&"
-        f"scope={scope}&"
-        f"state={state}"
+    # Behind the frontend's /api proxy, GitHub must return to the frontend origin so the cookies
+    # set by the callback are first-party there
+    callback_base = (settings.OAUTH_REDIRECT_BASE_URL or str(request.base_url)).rstrip("/")
+    redirect_uri = f"{callback_base}/api/auth/github/callback"
+
+    auth_url = "https://github.com/login/oauth/authorize?" + urlencode({
+        "client_id": settings.GITHUB_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "scope": scope,
+        "state": state,
+    })
+    response = RedirectResponse(url=auth_url)
+    # Bind the OAuth round-trip to this browser to prevent login CSRF
+    response.set_cookie(
+        key=OAUTH_STATE_COOKIE,
+        value=state,
+        httponly=True,
+        max_age=600,
+        samesite="lax",
+        secure=cookie_secure(),
+        path="/api/auth/github"
     )
-    return RedirectResponse(url=auth_url)
+    return response
 
 
 @router.get("/github/callback")
 async def github_callback(
+    request: Request,
     code: str,
     state: Optional[str] = None,
     db: AsyncSession = Depends(get_db)
@@ -127,6 +135,10 @@ async def github_callback(
             detail="GitHub OAuth credentials not configured."
         )
 
+    expected_state = request.cookies.get(OAUTH_STATE_COOKIE)
+    if not state or not expected_state or not secrets.compare_digest(state, expected_state):
+        raise HTTPException(status_code=400, detail="Invalid OAuth state. Please try signing in again.")
+
     # 1. Exchange code for access token
     async with httpx.AsyncClient(timeout=15.0) as client:
         token_resp = await client.post(
@@ -134,7 +146,7 @@ async def github_callback(
             headers={"Accept": "application/json"},
             data={
                 "client_id": settings.GITHUB_CLIENT_ID,
-                "client_secret": settings.GITHUB_CLIENT_SECRET,
+                "client_secret": secret_value(settings.GITHUB_CLIENT_SECRET),
                 "code": code,
             }
         )
@@ -238,8 +250,9 @@ async def github_callback(
         httponly=True,
         max_age=settings.JWT_EXPIRE_MINUTES * 60,
         samesite="lax",
-        secure=False  # Set True in production over HTTPS
+        secure=cookie_secure()
     )
+    response.delete_cookie(key=OAUTH_STATE_COOKIE, path="/api/auth/github")
     return response
 
 
@@ -266,5 +279,5 @@ async def get_me(user: User = Depends(get_current_user)):
 @router.post("/logout")
 async def logout(response: Response):
     """Clears the session cookie and logs the user out."""
-    response.delete_cookie(key=COOKIE_NAME, path="/")
+    response.delete_cookie(key=COOKIE_NAME, path="/", httponly=True, samesite="lax", secure=cookie_secure())
     return {"ok": True, "message": "Successfully logged out."}

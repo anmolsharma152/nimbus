@@ -1,0 +1,7 @@
+# Keep local secrets and dev artifacts out of the image (and out of reach of sandboxed agent commands)
+.env
+.env.*
+.venv/
+__pycache__/
+.pytest_cache/
+.coverage
