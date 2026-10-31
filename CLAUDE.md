@@ -43,13 +43,16 @@ cd backend
 uv run pytest                                   # full suite (all mocked; no DB/Redis/Docker needed)
 uv run pytest tests/test_workspace.py           # single file
 uv run pytest tests/test_api.py::test_create_task_endpoint   # single test
-uv run --with pytest-cov pytest --cov=app --cov-report=term-missing
+uv run pytest --cov --cov-report=term-missing   # CI fails under 78% (pyproject [tool.coverage.report])
+
+cd frontend
+npm test                                        # vitest (pure helpers in src/lib)
 ```
-There are no frontend tests.
+CI (`.github/workflows/ci.yml`, PRs and pushes to main): backend ruff + pytest with coverage floor; frontend eslint, `tsc`, vitest, `next build`.
 
 ## Code Style & Guidelines
 
-- Lint/format (no config is committed yet; run ad hoc): `uvx ruff check app tests evals`, `uvx ruff format`. Frontend: `npm run lint` (eslint, `eslint-config-next`), typecheck `./node_modules/.bin/tsc --noEmit` (do not use `npx tsc`, which installs the wrong package).
+- Lint: `uvx ruff check app tests evals alembic` (config in `backend/pyproject.toml`; only pyflakes + syntax errors are enforced, not formatting). Frontend: `npm run lint` (eslint, `eslint-config-next`; errors fail CI, warnings don't), `npm run typecheck` (do not use `npx tsc`, which installs the wrong package).
 - Python: PEP 8, 4 spaces, `snake_case`, async/await for all I/O. Blocking SDKs (docker-py, subprocess) go through `asyncio.to_thread` (see `UnifiedWorkspace`).
 - Request/response shapes are Pydantic `BaseModel`s declared in the router module. Errors surface as `HTTPException`. Ownership failures return **404**, not 403.
 - Workspace methods return `(exit_code, output)` tuples instead of raising. Callers must check the code.
