@@ -336,3 +336,40 @@ def test_push_never_updates_an_existing_remote_branch(bare_remote):
         assert _remote_sha(bare_remote, "nimbus/task-4244") == pushed
     finally:
         ws.cleanup()
+
+
+def test_push_to_stale_fork_builds_on_upstream_base(bare_remote, tmp_path):
+    """Without write access the branch goes to the user's fork, which may lack the base commit."""
+    fork = tmp_path / "fork.git"
+    _git("clone", "-q", "--bare", str(bare_remote), str(fork))
+    # Upstream moves on after the fork was made
+    work = tmp_path / "up"
+    _git("clone", "-q", str(bare_remote), str(work))
+    (work / "later.txt").write_text("later\n")
+    _git("add", ".", cwd=work)
+    _git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "later", cwd=work)
+    _git("push", "-q", "origin", "main", cwd=work)
+    upstream_head = _remote_sha(bare_remote, "main")
+    fork_main = _remote_sha(fork, "main")
+    assert fork_main != upstream_head
+
+    remote_url = f"file://{bare_remote}"
+    ws = SubprocessWorkspace(task_id=4245)
+    try:
+        code, out = ws.setup(repo_url=remote_url, branch_name="nimbus/task-4245")
+        assert code == 0, out
+        assert ws.base_sha == upstream_head
+        ws.execute_command("echo fix > fix.txt")
+        ws.commit_changes("agent commit")
+        code, out = ws.push_branch(
+            "nimbus/task-4245", "https://github.com/o/r", None,
+            remote_url=remote_url, push_url=f"file://{fork}"
+        )
+        assert code == 0, out
+    finally:
+        ws.cleanup()
+
+    assert _remote_sha(fork, "nimbus/task-4245^") == upstream_head
+    assert _remote_sha(fork, "main") == fork_main  # fork's own branches untouched
+    with pytest.raises(subprocess.CalledProcessError):
+        _remote_sha(bare_remote, "nimbus/task-4245")  # nothing pushed upstream

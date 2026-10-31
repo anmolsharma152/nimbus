@@ -176,23 +176,34 @@ def push_script(
     workdir: str,
     message: str,
     author_name: str,
-    author_email: str
+    author_email: str,
+    push_url: Optional[str] = None
 ) -> str:
+    """Rebuilds the agent's change on the base commit from remote_url and pushes it to push_url
+    (a fork) or back to remote_url."""
     q = shlex.quote
-    return "\n".join([
+    lines = [
         "set -e",
         f"git init -q {q(workdir)}",
         f"cd {q(workdir)}",
         f"git remote add origin {q(remote_url)}",
-        f"git fetch -q --depth 1 origin {q(base_sha)}",
+        # A fork may lack the base commit's history, so pushing there needs the full history
+        f"git fetch -q origin {q(base_sha)}" if push_url else f"git fetch -q --depth 1 origin {q(base_sha)}",
         f"git checkout -q -b {q(branch_name)} FETCH_HEAD",
         f"git apply --index {q(patch_path)}",
         f"git -c user.name={q(author_name)} -c user.email={q(author_email)} commit -q -m {q(message)}",
-        # Empty lease value = the branch must not exist yet, so a task can never overwrite or
-        # fast-forward an existing branch (the repo's default branch included)
-        f"git push -q --force-with-lease={q('refs/heads/' + branch_name + ':')} origin "
-        f"{q('HEAD:refs/heads/' + branch_name)}",
-    ])
+    ]
+    target = "origin"
+    if push_url:
+        lines.append(f"git remote add target {q(push_url)}")
+        target = "target"
+    # Empty lease value = the branch must not exist yet, so a task can never overwrite or
+    # fast-forward an existing branch (the repo's default branch included)
+    lines.append(
+        f"git push -q --force-with-lease={q('refs/heads/' + branch_name + ':')} {target} "
+        f"{q('HEAD:refs/heads/' + branch_name)}"
+    )
+    return "\n".join(lines)
 
 
 def github_push_url(repo_url: str) -> Optional[str]:
@@ -437,7 +448,8 @@ class DockerWorkspace:
         github_token: Optional[str] = None,
         message: str = "Nimbus agent automated changes",
         author_name: str = "Nimbus Agent",
-        author_email: str = "agent@nimbus.ai"
+        author_email: str = "agent@nimbus.ai",
+        push_url: Optional[str] = None
     ) -> Tuple[int, str]:
         """Replays the agent's changes onto a fresh clone inside a helper container and pushes it."""
         if not github_token:
@@ -457,7 +469,7 @@ class DockerWorkspace:
         return self._run_helper(
             push_script(
                 remote_url, self.base_sha, branch_name, "/tmp/changes.patch", "/tmp/push",
-                clean_commit_message(message), author_name, author_email
+                clean_commit_message(message), author_name, author_email, push_url
             ),
             environment=git_auth_env(github_token),
             mount_repo_volume=False,
@@ -666,7 +678,8 @@ class SubprocessWorkspace:
         message: str = "Nimbus agent automated changes",
         author_name: str = "Nimbus Agent",
         author_email: str = "agent@nimbus.ai",
-        remote_url: Optional[str] = None
+        remote_url: Optional[str] = None,
+        push_url: Optional[str] = None
     ) -> Tuple[int, str]:
         """Replays the agent's changes onto a fresh private clone and pushes that, never the agent's .git."""
         if not github_token and remote_url is None:
@@ -696,7 +709,7 @@ class SubprocessWorkspace:
             return self._run_trusted_git(
                 push_script(
                     remote_url, self.base_sha, branch_name, patch_path, "push",
-                    clean_commit_message(message), author_name, author_email
+                    clean_commit_message(message), author_name, author_email, push_url
                 ),
                 github_token
             )
@@ -771,11 +784,12 @@ class UnifiedWorkspace:
         github_token: Optional[str] = None,
         message: str = "Nimbus agent automated changes",
         author_name: str = "Nimbus Agent",
-        author_email: str = "agent@nimbus.ai"
+        author_email: str = "agent@nimbus.ai",
+        push_url: Optional[str] = None
     ) -> Tuple[int, str]:
         return await asyncio.to_thread(
             self.impl.push_branch, branch_name, repo_url, github_token,
-            message=message, author_name=author_name, author_email=author_email
+            message=message, author_name=author_name, author_email=author_email, push_url=push_url
         )
 
     async def acleanup(self):

@@ -137,7 +137,7 @@ async def test_failed_setup_fails_task_without_running_agent():
 
     task = Task(id=5, prompt="p", status=TaskStatus.PENDING)
     ws = MagicMock()
-    ws.asetup = AsyncMock(return_value=(128, "Failed to clone repository"))
+    ws.asetup = AsyncMock(return_value=(128, "Failed to set up workspace"))
     ws.acleanup = AsyncMock()
 
     with patch("app.worker.settings.GEMINI_API_KEY", "k"), \
@@ -146,7 +146,7 @@ async def test_failed_setup_fails_task_without_running_agent():
          patch("app.worker.LLMChatSession") as mock_llm, \
          patch("app.worker.log_event", new_callable=AsyncMock):
         mock_session_ctx.return_value.__aenter__.return_value = _worker_db(task)
-        await run_agent_loop(ctx={}, task_id=5, prompt="p", repo_url="https://github.com/o/r")
+        await run_agent_loop(ctx={}, task_id=5, prompt="p")
 
     assert task.status == TaskStatus.FAILED
     assert not mock_llm.called

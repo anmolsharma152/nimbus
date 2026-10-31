@@ -17,8 +17,8 @@ from .db import async_session
 from .models import User, UserCredential, Task, TaskEvent, EventType, TaskStatus
 from .settings import settings, secret_value
 from .security import decrypt_secret, internal_api_token
-from .workspace import UnifiedWorkspace, get_docker_client, reap_orphaned_containers, reap_orphaned_volumes
-from .github_client import create_draft_pr
+from .workspace import UnifiedWorkspace, github_push_url, get_docker_client, reap_orphaned_containers, reap_orphaned_volumes
+from .github_client import RepoAccess, create_draft_pr, ensure_fork, get_repo_access, parse_github_repo
 from .llm import LLMChatSession
 from .branches import validate_task_branch
 from .agent import SYSTEM_INSTRUCTION, initial_prompt, run_agent_commands
@@ -109,6 +109,75 @@ def _log_task_summary(stats: dict, duration_s: float):
     logger.info("Task finished: %s", summary["task_status"], extra=summary)
 
 
+async def _fail_before_start(db: AsyncSession, task: Task, stats: dict, reason: str, message: str):
+    logger.warning("Refusing task", extra={"event": "task_refused", "reason": reason})
+    stats.update(status="failed", reason=reason)
+    task.status = TaskStatus.FAILED
+    await db.commit()
+    await log_event(db, task.id, EventType.LOG, {"message": message})
+    await log_event(db, task.id, EventType.STATUS, {"status": "failed"})
+
+
+async def _deliver_changes(
+    db: AsyncSession,
+    task: Task,
+    workspace: UnifiedWorkspace,
+    repo_url: str,
+    repo_access: RepoAccess,
+    token: str,
+    branch_name: str,
+    prompt: str,
+    diff_text: str,
+    author_name: str,
+    author_email: str,
+    author_tag: str,
+    stats: dict,
+):
+    """Pushes the task branch (to a fork when the user cannot push upstream) and opens a draft PR
+    against the repo's default branch."""
+    task_id = task.id
+    push_url = None
+    head_owner = None
+    fork_name = None
+    if not repo_access.can_push:
+        await log_event(db, task_id, EventType.LOG, {"message": f"Forking {repo_access.full_name} to your account..."})
+        fork_name, fork_error = await ensure_fork(repo_access, token)
+        if fork_error:
+            await log_event(db, task_id, EventType.LOG, {"message": f"Could not push changes: {fork_error}"})
+            return
+        push_url = github_push_url(fork_name)
+        head_owner = fork_name.split("/", 1)[0]
+
+    target = fork_name or repo_access.full_name
+    await log_event(db, task_id, EventType.LOG, {"message": f"Pushing branch '{branch_name}' to {target}..."})
+    push_code, push_out = await workspace.apush_branch(
+        branch_name, repo_url, token,
+        message=f"Nimbus: {prompt[:60]}",
+        author_name=author_name,
+        author_email=author_email,
+        push_url=push_url,
+    )
+    if push_code != 0:
+        await log_event(db, task_id, EventType.LOG, {"message": f"Failed to push branch: {push_out}"})
+        return
+
+    pr_url = await create_draft_pr(
+        repo_url=repo_url,
+        title=f"Nimbus Agent: {prompt[:60]}",
+        body=f"### Automated Pull Request by Nimbus\n\n**Task #{task_id}**\n**Author:** {author_tag}\n\n**Prompt:**\n{prompt}\n\n### Changes Generated:\n```diff\n{diff_text[:3000]}\n```",
+        head_branch=branch_name,
+        base_branch=repo_access.default_branch,
+        token=token,
+        head_owner=head_owner,
+    )
+    if pr_url:
+        task.pr_url = pr_url
+        stats["pr_opened"] = True
+        await log_event(db, task_id, EventType.LOG, {"message": f"Draft PR opened successfully: {pr_url}"})
+    else:
+        await log_event(db, task_id, EventType.LOG, {"message": "Branch pushed, but Draft PR creation failed."})
+
+
 async def _execute_agent_task(
     task_id: int,
     prompt: str,
@@ -176,34 +245,35 @@ async def _execute_agent_task(
             except ValueError as e:
                 refusal = ("invalid_branch", str(e))
         if refusal:
-            reason, message = refusal
-            logger.warning("Refusing task", extra={"event": "task_refused", "reason": reason})
-            stats.update(status="failed", reason=reason)
-            task.status = TaskStatus.FAILED
-            await db.commit()
-            await log_event(db, task_id, EventType.LOG, {"message": message})
-            await log_event(db, task_id, EventType.STATUS, {"status": "failed"})
+            await _fail_before_start(db, task, stats, *refusal)
             return
 
         has_any_llm_key = bool(
             user_gemini_key or user_groq_key or user_openrouter_key or
             settings.GEMINI_API_KEY or settings.GROQ_API_KEY or settings.OPENROUTER_API_KEY
         )
-
         if not has_any_llm_key:
-            logger.warning("No LLM API keys configured (user BYOK or server environment); failing task")
-            stats.update(status="failed", reason="no_llm_key")
-            task.status = TaskStatus.FAILED
-            await db.commit()
-            await log_event(
-                db,
-                task_id,
-                EventType.LOG,
-                {"message": "No LLM API keys configured. Please configure an API key in Settings or environment."}
+            await _fail_before_start(
+                db, task, stats, "no_llm_key",
+                "No LLM API keys configured. Please configure an API key in Settings or environment."
             )
-            await log_event(db, task_id, EventType.STATUS, {"status": "failed"})
             return
-        
+
+        # Check access as the task owner before spending a sandbox and LLM calls on the task
+        repo_access = None
+        if repo_url and parse_github_repo(repo_url):
+            repo_access, access_error = await get_repo_access(repo_url, final_github_token)
+            if access_error:
+                await _fail_before_start(db, task, stats, "repo_access", access_error)
+                return
+            if final_github_token and not repo_access.can_push and not repo_access.allow_forking:
+                await _fail_before_start(
+                    db, task, stats, "repo_access",
+                    f"You have no write access to {repo_access.full_name} and it does not allow forking, "
+                    "so Nimbus could not deliver the changes."
+                )
+                return
+
         task.status = TaskStatus.RUNNING
         task.git_branch = branch_name
         await db.commit()
@@ -214,6 +284,11 @@ async def _execute_agent_task(
             EventType.LOG,
             {"message": f"Agent initialized for @{git_user_name}. Provisioning isolated workspace on branch '{branch_name}'..."}
         )
+        if repo_access and final_github_token and not repo_access.can_push:
+            await log_event(db, task_id, EventType.LOG, {
+                "message": f"You have no write access to {repo_access.full_name}; changes will be pushed to "
+                           "a fork under your account and proposed as a pull request."
+            })
 
         try:
             setup_code, setup_out = await workspace.asetup(
@@ -280,32 +355,12 @@ async def _execute_agent_task(
                 )
                 await workspace.acommit_changes(f"Nimbus: {prompt[:60]}")
                 
-                # Push branch and open Draft PR if repo_url and token exist
-                if repo_url and final_github_token:
-                    await log_event(db, task_id, EventType.LOG, {"message": f"Pushing branch '{branch_name}' to GitHub..."})
-                    push_code, push_out = await workspace.apush_branch(
-                        branch_name, repo_url, final_github_token,
-                        message=f"Nimbus: {prompt[:60]}",
-                        author_name=git_user_name,
-                        author_email=git_user_email
+                if repo_access and final_github_token:
+                    await _deliver_changes(
+                        db, task, workspace, repo_url, repo_access, final_github_token, branch_name,
+                        prompt, diff_text, git_user_name, git_user_email,
+                        author_tag=f"@{user.username}" if user else "Nimbus Agent", stats=stats,
                     )
-                    if push_code == 0:
-                        author_tag = f"@{user.username}" if user else "Nimbus Agent"
-                        pr_url = await create_draft_pr(
-                            repo_url=repo_url,
-                            title=f"Nimbus Agent: {prompt[:60]}",
-                            body=f"### Automated Pull Request by Nimbus\n\n**Task #{task_id}**\n**Author:** {author_tag}\n\n**Prompt:**\n{prompt}\n\n### Changes Generated:\n```diff\n{diff_text[:3000]}\n```",
-                            head_branch=branch_name,
-                            token=final_github_token
-                        )
-                        if pr_url:
-                            task.pr_url = pr_url
-                            stats["pr_opened"] = True
-                            await log_event(db, task_id, EventType.LOG, {"message": f"Draft PR opened successfully: {pr_url}"})
-                        else:
-                            await log_event(db, task_id, EventType.LOG, {"message": "Branch pushed, but Draft PR creation failed."})
-                    else:
-                        await log_event(db, task_id, EventType.LOG, {"message": f"Failed to push branch: {push_out}"})
 
             task.status = TaskStatus.COMPLETED
             await db.commit()
