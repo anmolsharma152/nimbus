@@ -466,14 +466,19 @@ async def _load_rerunnable_task(task_id: int, user: Optional[User], db: AsyncSes
     return task
 
 
-async def _requeue(task: Task, db: AsyncSession, log_message: str):
+async def _requeue(task: Task, db: AsyncSession, log_message: str, turn: str, text: Optional[str] = None):
+    """Re-queues the task. The LOG event marks where the new run starts (`turn`: "follow_up" or
+    "retry"), so the task page can show each run under the message that started it."""
     task.status = TaskStatus.PENDING
     await db.commit()
 
+    marker = {"message": log_message, "turn": turn}
+    if text is not None:
+        marker["text"] = text
     db.add(TaskEvent(
         task_id=task.id,
         event_type=EventType.LOG,
-        payload=json.dumps({"message": log_message})
+        payload=json.dumps(marker)
     ))
     await db.commit()
 
@@ -502,7 +507,7 @@ async def retry_task(
 
     task.patch_diff = None
     task.base_sha = None
-    await _requeue(task, db, "🔄 Task restarted by user. Relaunching agent reasoning loop...")
+    await _requeue(task, db, "🔄 Task restarted by user. Relaunching agent reasoning loop...", turn="retry")
     return {"id": task.id, "status": "pending", "message": "Task re-queued successfully"}
 
 
@@ -537,7 +542,7 @@ async def send_follow_up(
     await check_task_submission_limits(user if task.user_id is not None else None, db)
 
     db.add(TaskMessage(task_id=task.id, content=req.message))
-    await _requeue(task, db, f"💬 Follow-up: {req.message}")
+    await _requeue(task, db, f"💬 Follow-up: {req.message}", turn="follow_up", text=req.message)
     return {"id": task.id, "status": "pending", "message": "Follow-up queued on this task"}
 
 @app.delete("/api/tasks/{task_id}")

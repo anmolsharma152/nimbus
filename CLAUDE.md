@@ -60,7 +60,7 @@ CI (`.github/workflows/ci.yml`, PRs and pushes to main): backend ruff + pytest w
 - Workspace methods return `(exit_code, output)` tuples instead of raising. Callers must check the code.
 - Enums are stored upper-case (`TaskStatus`, `EventType`) and serialized lower-case to clients.
 - Logging: `logger = logging.getLogger(__name__)`, never `print()`. `app/logging_config.py` adds request_id/task_id to every record; pass structured fields via `extra={"event": ...}`. Never log prompts, tokens or keys (log lengths/ids instead). Each task emits one `task_finished` line (status, duration, iterations, LLM tier usage).
-- TypeScript: functional components + hooks, App Router, CSS modules per page/component.
+- TypeScript: functional components + hooks, App Router, CSS modules per page/component. Keep logic in tested pure helpers under `src/lib` (e.g. `taskThread.ts` turns the event stream into conversation turns; follow-up/retry boundaries are LOG events whose payload has `turn`, written by `_requeue` in `main.py`).
 - Never commit `.env`. Treat everything executed inside a workspace (LLM output, cloned repo contents) as untrusted.
 
 ## Architecture Overview
@@ -79,7 +79,7 @@ frontend (Next.js) ──REST──▶ app/main.py (FastAPI)
       │                     log_event(): TaskEvent row + Redis pub/sub (app/events.py)
       └── manager.broadcast ◀── HTTP POST /api/internal/tasks/{id}/events (worker → API)
 ```
-- `app/auth.py`: GitHub OAuth, JWT in the `nimbus_session` cookie or a Bearer token. The frontend proxies `/api/*` to the backend (`frontend/next.config.ts`, `src/lib/api.ts`), so the cookie is first-party; the WebSocket connects to the backend directly with a 60 s ticket from `POST /api/tasks/{id}/stream-ticket` (never a session JWT in the URL). `app/credentials.py`: encrypted BYOK vault + onboarding. `app/ratelimit.py`: per-user concurrency/hourly quotas.
+- `app/auth.py`: GitHub OAuth, JWT in the `nimbus_session` cookie or a Bearer token. The frontend proxies `/api/*` to the backend (`frontend/next.config.ts`, `src/lib/api.ts`), so the cookie is first-party; the WebSocket connects to the backend directly with a 60 s ticket from `POST /api/tasks/{id}/stream-ticket` (never a session JWT in the URL). `app/credentials.py`: encrypted BYOK vault + onboarding. `app/ratelimit.py`: per-user concurrency/hourly quotas. `app/model_prefs.py`: per-user model choices (`/api/settings/models`, allowlisted), passed by the worker to `LLMChatSession`.
 - `app/db.py`: async SQLAlchemy engine (asyncpg). Schema lives in Alembic **and** in ad-hoc `ALTER TABLE` statements in `main.lifespan`.
 - Live events reach sockets two ways: Redis pub/sub (`relay_redis_events` in `main.py`, via `event_bus.subscribe_all`) and the worker's HTTP POST to the internal endpoint as a fallback; `ConnectionManager` de-duplicates by event id.
 - Follow-ups: `POST /api/tasks/{id}/messages` stores a `TaskMessage` and re-queues the same task. The worker rebuilds state from `tasks.base_sha` + `patch_diff` (cumulative), prompts with the goal plus all messages, and updates the same branch (`head_repo`) and PR. Retry clears `patch_diff`/`base_sha` but keeps branch, `pushed_sha` and `pr_url`.

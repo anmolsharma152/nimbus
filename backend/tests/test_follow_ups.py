@@ -1,6 +1,7 @@
 """Follow-ups continue the same task, branch and PR instead of creating a new task."""
 
 import datetime
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -75,7 +76,10 @@ async def test_follow_up_requeues_the_same_task(api):
     added = [c.args[0] for c in db.add.call_args_list]
     message = next(a for a in added if isinstance(a, TaskMessage))
     assert (message.task_id, message.content) == (21, "Also add a test")
-    assert any(isinstance(a, TaskEvent) and "Also add a test" in a.payload for a in added)
+    marker = next(a for a in added if isinstance(a, TaskEvent))
+    assert json.loads(marker.payload) == {
+        "message": "💬 Follow-up: Also add a test", "turn": "follow_up", "text": "Also add a test"
+    }
     # State the follow-up builds on is kept
     assert task.patch_diff and task.base_sha == BASE and task.pushed_sha == PUSHED and task.pr_url
     enqueue.assert_awaited_once_with(21, task.prompt, task.repo_url, "nimbus/task-21")
@@ -133,7 +137,7 @@ async def test_follow_up_counts_against_rate_limit(api):
 
 @pytest.mark.asyncio
 async def test_retry_starts_over_but_keeps_branch_and_pr(api):
-    _, set_task = api
+    db, set_task = api
     task = _done_task(status=TaskStatus.FAILED)
     set_task(task)
     _sign_in()
@@ -142,6 +146,8 @@ async def test_retry_starts_over_but_keeps_branch_and_pr(api):
     assert resp.status_code == 200
     assert task.patch_diff is None and task.base_sha is None
     assert task.pushed_sha == PUSHED and task.pr_url and task.head_repo == "org/proj"
+    marker = next(c.args[0] for c in db.add.call_args_list if isinstance(c.args[0], TaskEvent))
+    assert json.loads(marker.payload)["turn"] == "retry"
 
 
 def test_hourly_limit_counts_tasks_and_follow_ups():

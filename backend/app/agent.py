@@ -133,7 +133,7 @@ async def run_agent_commands(
                     output = output[:MAX_OUTPUT_CHARS] + "\n...[output truncated for length]"
 
                 result_str = f"[Exit code: {exit_code}]\n{output}"
-                await emit(EventType.RESULT, {"output": result_str})
+                await emit(EventType.RESULT, {"output": result_str, "exit_code": exit_code})
 
                 current_prompt = f"Command output:\n{result_str}"
             except Exception as e:

@@ -14,15 +14,14 @@
   - Repo tasks require sign-in, there is no server GitHub token, and protected branches are rejected. Pushes can never touch a branch Nimbus didn't create.
   - Repo access is checked before running, with a fork flow when the user can't push. PRs target the default branch.
   - Follow-ups continue the same task, branch and PR.
+  - Task page as a conversation: one turn per goal / follow-up / retry, collapsible command blocks with exit codes, a status banner, and a follow-up composer under the thread. Repo search on the home page works, and model choices are saved per account and used by the worker.
 
 ## Next
 
-1. **Chat/task-page UX:** thread view of goal and follow-ups, collapsible command blocks, clearer
-   states, the repo search filter, and model preferences sent to the backend (they're stored only locally today).
-2. **Smaller fixes:** the Gemini tier is skipped unless the server has `GEMINI_API_KEY`, so a user's own Gemini key alone never works; pushing to an empty repo;
+1. **Smaller fixes:** the Gemini tier is skipped unless the server has `GEMINI_API_KEY`, so a user's own Gemini key alone never works; pushing to an empty repo;
    clones are full depth (a shallow clone must still reach a follow-up's base commit); `arq` `max_jobs` on the 512 MB Render instance; `alembic stamp head` on
    databases created by `main.lifespan`.
-3. **Workspace isolation in production:** resource and network limits for SubprocessWorkspace, or a
+2. **Workspace isolation in production:** resource and network limits for SubprocessWorkspace, or a
    `WorkspaceProvider` protocol with a microVM backend (Fly Machines / Modal / Firecracker).
-4. **Later:** GitHub App installation tokens, approvals for high-impact actions, audit trail,
+3. **Later:** GitHub App installation tokens, approvals for high-impact actions, audit trail,
    steering a run while it is in progress, code indexing / LSP diagnostics.

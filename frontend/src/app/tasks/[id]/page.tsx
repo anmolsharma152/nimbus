@@ -14,6 +14,8 @@ import {
   streamUrl,
 } from "@/lib/taskStream";
 import { API_BASE, WS_BASE } from "@/lib/api";
+import { buildThread, summarizeStatus } from "@/lib/taskThread";
+import TaskThread from "@/components/TaskThread";
 
 interface EventPayload {
   id?: number | null;
@@ -50,7 +52,6 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
   const [screenshots, setScreenshots] = useState<ScreenshotItem[]>([]);
   const [activeTab, setActiveTab] = useState<"terminal" | "diff" | "visual">("terminal");
   const [selectedImageModal, setSelectedImageModal] = useState<string | null>(null);
-  const [showDiff, setShowDiff] = useState(true);
   const [copied, setCopied] = useState(false);
   const [followupText, setFollowupText] = useState("");
   const [isSendingFollowup, setIsSendingFollowup] = useState(false);
@@ -352,6 +353,8 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
   };
 
   const isStopable = task?.status === "running" || task?.status === "pending";
+  const thread = buildThread(task?.prompt || "", events);
+  const statusSummary = summarizeStatus(task?.status, task || {}, thread[thread.length - 1]);
 
   return (
     <div className={styles.layout}>
@@ -489,73 +492,10 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
             )}
           </div>
 
-          {/* Follow-up Prompt Section */}
-          <div className={styles.followupSection}>
-            <h3 className={styles.paneTitle}>💬 Send Follow-Up Directive</h3>
-            <form onSubmit={handleSendFollowup}>
-              <textarea
-                className={styles.followupTextarea}
-                placeholder="Give additional instructions (e.g., Also fix imports in test_metrics.py or add docstrings)..."
-                rows={3}
-                value={followupText}
-                onChange={(e) => setFollowupText(e.target.value)}
-              />
-              <button
-                type="submit"
-                className={styles.followupBtn}
-                disabled={!followupText.trim() || isSendingFollowup || isStopable}
-                title={isStopable ? "Wait for the current run to finish" : undefined}
-              >
-                {isSendingFollowup ? "Dispatching..." : "Send Follow-Up Directives ➔"}
-              </button>
-              {followupError && (
-                <p className={styles.followupError} role="alert">
-                  {followupError}
-                </p>
-              )}
-            </form>
-          </div>
-
-          {/* Generated Patch Diff (if available) */}
           {task?.patch_diff && (
-            <div className="glass-panel" style={{ flex: 1, padding: "18px", display: "flex", flexDirection: "column", overflow: "hidden", background: "rgba(18, 19, 28, 0.75)", border: "1px solid rgba(255, 255, 255, 0.1)" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
-                <h3 className={styles.paneTitle} style={{ margin: 0 }}>Generated Patch Diff</h3>
-                <button
-                  onClick={() => setShowDiff(!showDiff)}
-                  style={{
-                    background: "rgba(255, 255, 255, 0.05)",
-                    border: "1px solid var(--surface-border)",
-                    color: "#c7d2fe",
-                    padding: "3px 8px",
-                    borderRadius: "4px",
-                    cursor: "pointer",
-                    fontSize: "0.75rem"
-                  }}
-                >
-                  {showDiff ? "Collapse" : "Expand"}
-                </button>
-              </div>
-              {showDiff && (
-                <pre
-                  style={{
-                    flex: 1,
-                    overflow: "auto",
-                    fontSize: "0.8rem",
-                    fontFamily: "var(--font-geist-mono), monospace",
-                    background: "#08080c",
-                    padding: "12px",
-                    borderRadius: "6px",
-                    color: "#98c379",
-                    whiteSpace: "pre-wrap",
-                    lineHeight: "1.4",
-                    border: "1px solid rgba(255, 255, 255, 0.08)"
-                  }}
-                >
-                  {task.patch_diff}
-                </pre>
-              )}
-            </div>
+            <button type="button" className={styles.diffShortcut} onClick={() => setActiveTab("diff")}>
+              View patch diff ({task.patch_diff.split("\n").length} lines) →
+            </button>
           )}
         </div>
 
@@ -572,7 +512,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
                 <polyline points="4 17 10 11 4 5"></polyline>
                 <line x1="12" y1="19" x2="20" y2="19"></line>
               </svg>
-              <span>Terminal Flight Recorder</span>
+              <span>Conversation</span>
             </button>
 
             <button
@@ -614,7 +554,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
                   <div className={styles.macButtons}>
                     <span></span><span></span><span></span>
                   </div>
-                  <span className={styles.terminalTitle}>Agent Execution Terminal</span>
+                  <span className={styles.terminalTitle}>Conversation</span>
                 </div>
                 <button
                   className={styles.copyBtn}
@@ -626,41 +566,43 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
               </div>
               
               <div className={styles.terminalBody}>
-                {events.length === 0 && (
-                  <div style={{ color: "#71717a", fontSize: "0.85rem", fontStyle: "italic", padding: "12px 0" }}>
-                    Provisioning isolated workspace &amp; waiting for agent output...
-                  </div>
-                )}
-                {events.map((ev, idx) => {
-                  const parsed = parsePayload(ev.payload);
-
-                  const evType = (ev.type || "").toLowerCase();
-                  if (evType === "log" || evType === "status") {
-                    return (
-                      <div key={idx} className={styles.logLine}>
-                        <span className={styles.timestamp}>{new Date(ev.timestamp).toLocaleTimeString()}</span>
-                        <span className={styles.logText}>{parsed.message || `Status changed to ${parsed.status}`}</span>
-                      </div>
-                    );
-                  } else if (evType === "command") {
-                    return (
-                      <div key={idx} className={styles.commandLine}>
-                        <span className={styles.prompt}>$</span> {parsed.command}
-                      </div>
-                    );
-                  } else if (evType === "result") {
-                    return (
-                      <div key={idx} className={styles.resultLine}>
-                        {parsed.output}
-                      </div>
-                    );
-                  }
-                  return null;
-                })}
-                {task?.status === 'running' && (
-                  <div className={styles.blinkingCursor}>█</div>
-                )}
+                <TaskThread turns={thread} isActive={!isTerminal} summary={statusSummary} />
               </div>
+
+              {/* Follow-up composer: continues this task on the same branch and PR */}
+              <form className={styles.composer} onSubmit={handleSendFollowup}>
+                <textarea
+                  className={styles.composerInput}
+                  aria-label="Follow-up instruction"
+                  placeholder={
+                    isStopable
+                      ? "You can send a follow-up when this run finishes (or stop it first)."
+                      : "Ask for a change to this task, e.g. “Also add tests for the new route”. Ctrl+Enter to send."
+                  }
+                  rows={2}
+                  value={followupText}
+                  onChange={(e) => setFollowupText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                      e.preventDefault();
+                      e.currentTarget.form?.requestSubmit();
+                    }
+                  }}
+                />
+                <button
+                  type="submit"
+                  className={styles.composerBtn}
+                  disabled={!followupText.trim() || isSendingFollowup || isStopable}
+                  title={isStopable ? "Wait for the current run to finish" : "Send follow-up (Ctrl+Enter)"}
+                >
+                  {isSendingFollowup ? "Sending…" : "Send"}
+                </button>
+                {followupError && (
+                  <p className={styles.followupError} role="alert">
+                    {followupError}
+                  </p>
+                )}
+              </form>
             </div>
           )}
 
