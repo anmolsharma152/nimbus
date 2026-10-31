@@ -208,7 +208,7 @@ export default function Home() {
               <span className={styles.featureIcon}>🐳</span>
               <h3 className={styles.featureTitle}>Hardened Sandboxes</h3>
               <p className={styles.featureDesc}>
-                Each task executes inside an ephemeral microVM container with strict cgroups memory & CPU limits, dropped capabilities, and no-new-privileges flags.
+                Each task runs in its own disposable workspace as an unprivileged user with a scrubbed environment, and your GitHub token never enters it.
               </p>
             </div>
             <div className={styles.featureCard}>

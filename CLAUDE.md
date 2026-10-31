@@ -17,11 +17,13 @@ cd frontend
 npm install
 npm run build
 ```
-Config: copy `.env.example` → `.env` (settings load `.env` and `../.env`). Key vars: `DATABASE_URL`, `REDIS_URL`, `GEMINI_API_KEY` / `GROQ_API_KEY` / `OPENROUTER_API_KEY` (at least one needed to run tasks), `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (OAuth), `JWT_SECRET_KEY` (also derives the Fernet key for the credential vault, so rotating it breaks stored secrets), `FRONTEND_URL`, `OAUTH_REDIRECT_BASE_URL`, `API_INTERNAL_URL`, `API_PROXY_URL` (frontend), `NEXT_PUBLIC_WS_URL`.
+Config: copy `.env.example` → `.env` (settings load `.env` and `../.env`). Key vars: `DATABASE_URL`, `REDIS_URL`, `GEMINI_API_KEY` / `GROQ_API_KEY` / `OPENROUTER_API_KEY` (at least one needed to run tasks), `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (OAuth; there is no server GitHub token, repo tasks use the signed-in user's token), `ANON_TASKS_PER_HOUR`, `JWT_SECRET_KEY` (also derives the Fernet key for the credential vault, so rotating it breaks stored secrets), `FRONTEND_URL`, `OAUTH_REDIRECT_BASE_URL`, `API_INTERNAL_URL`, `API_PROXY_URL` (frontend), `NEXT_PUBLIC_WS_URL`.
 
 System prerequisites: PostgreSQL 16, Redis (optional: without it, `enqueue_task` runs the agent in-process), Docker daemon (optional: without it, `SubprocessWorkspace` runs commands on the host, as a per-task UID with a scrubbed env when the worker is root, as on Render).
 
 Token rule: anything holding the GitHub token (clone, push) runs outside the agent's user and never reads the agent's `.git`; push replays the agent's patch onto a fresh clone (`app/workspace.py`, "Token-safe git operations").
+
+Branch rule: every push uses `--force-with-lease` (`push_script`): empty lease for a first push (never touch an existing branch), `tasks.pushed_sha` for follow-ups/retries. User branch names go through `app/branches.py`. Never add a plain push or an unconditional `--force`.
 
 ## Run Commands
 
@@ -72,10 +74,12 @@ frontend (Next.js) ──REST──▶ app/main.py (FastAPI)
       │                       ├─ app/workspace.py UnifiedWorkspace → DockerWorkspace | SubprocessWorkspace
       │                       ├─ app/llm.py LLMChatSession: Gemini → Groq → OpenRouter failover
       │                       ├─ loop: LLM emits ```json {"command": ...}``` → exec → feed output back
-      │                       └─ diff → commit → push → app/github_client.create_draft_pr
+      │                       ├─ github_client.get_repo_access (as the owner) before the sandbox starts
+      │                       └─ diff → _deliver_changes: push (repo, or fork via ensure_fork) → create_draft_pr into default branch
       │                     log_event(): TaskEvent row + Redis pub/sub (app/events.py)
       └── manager.broadcast ◀── HTTP POST /api/internal/tasks/{id}/events (worker → API)
 ```
 - `app/auth.py`: GitHub OAuth, JWT in the `nimbus_session` cookie or a Bearer token. The frontend proxies `/api/*` to the backend (`frontend/next.config.ts`, `src/lib/api.ts`), so the cookie is first-party; the WebSocket connects to the backend directly with a 60 s ticket from `POST /api/tasks/{id}/stream-ticket` (never a session JWT in the URL). `app/credentials.py`: encrypted BYOK vault + onboarding. `app/ratelimit.py`: per-user concurrency/hourly quotas.
 - `app/db.py`: async SQLAlchemy engine (asyncpg). Schema lives in Alembic **and** in ad-hoc `ALTER TABLE` statements in `main.lifespan`.
-- Live streaming currently depends on the worker's HTTP POST to the internal endpoint. The Redis `subscribe_task` path in `events.py` is never consumed, so cross-replica fan-out does not work.
+- Live events reach sockets two ways: Redis pub/sub (`relay_redis_events` in `main.py`, via `event_bus.subscribe_all`) and the worker's HTTP POST to the internal endpoint as a fallback; `ConnectionManager` de-duplicates by event id.
+- Follow-ups: `POST /api/tasks/{id}/messages` stores a `TaskMessage` and re-queues the same task. The worker rebuilds state from `tasks.base_sha` + `patch_diff` (cumulative), prompts with the goal plus all messages, and updates the same branch (`head_repo`) and PR. Retry clears `patch_diff`/`base_sha` but keeps branch, `pushed_sha` and `pr_url`.

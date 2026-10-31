@@ -8,13 +8,14 @@
 
 | Milestone Phase | Focus Area | Status | Key Deliverables |
 | :--- | :--- | :---: | :--- |
-| **Phase 0** | Foundation, Storage & Sandboxing | ✅ **Completed** | Asynchronous PostgreSQL persistence, Alembic migrations, Redis `arq` queue, Docker resource limits (`1g` RAM, `2.0` CPU, `256` PIDs, `cap_drop ALL`). |
+| **Phase 0** | Foundation, Storage & Sandboxing | ✅ **Completed** | Asynchronous PostgreSQL persistence, Alembic migrations, Redis `arq` queue, Docker-mode resource limits (`1g` RAM, `2.0` CPU, `256` PIDs, `cap_drop ALL`). |
 | **Phase 1** | Single-Agent Execution & Patching | ✅ **Completed** | 3-tier resilient LLM router (Gemini 3.6/3.7/3.5 $\to$ Groq 120B $\to$ OpenRouter), disk write enforcement, git diff capture, Next.js streaming terminal. |
 | **Phase 2** | GitHub Workflow & Cloud Console | ✅ **Completed** | Branch isolation (`nimbus/task-<id>`), automated GitHub Draft PR dispatch, 100-repo selector, multi-cloud deployment (Render + Neon + Upstash + Vercel). |
 | **Phase 3** | Identity & Access Control (AuthN/Z) | ✅ **Completed** | GitHub OAuth 2.0, HTTP-only JWT sessions, multi-tenant database scoping (`user_id`), dynamic repository proxy (`GET /api/repos`). |
 | **Phase 4** | Credential Vault & Distributed Bus | ✅ **Completed** | Server-backed Fernet AES-256 BYOK vault (`UserCredential`), 4-step onboarding wizard (`/onboarding`), Redis Pub/Sub & Streams distributed event bus. |
 | **Phase 5** | Visual Verification & Evals Harness | ✅ **Completed** | Binary base64 screenshot extraction, 3-tab inspector (Terminal, Patch Diff, Visual Preview + Lightbox), SWE benchmark evaluation suite (`eval_runner.py`). |
-| **Phase 6** | Unified Workspace & MicroVMs | 🔄 **In Progress** | `WorkspaceProvider` protocol interface, cloud MicroVM sandboxes (Fly Machines / Modal / Firecracker), automated multi-cloud CI/CD deployment blueprints. |
+| **Hardening** | Security, Reliability & Delivery | ✅ **Completed** | Sign-in for repo tasks (no server token), protected-branch and force-with-lease push rules, access check + fork flow, follow-ups on the same task/branch/PR, CI quality gates. |
+| **Phase 6** | Unified Workspace & MicroVMs | 📋 **Planned** | `WorkspaceProvider` protocol interface, cloud MicroVM sandboxes (Fly Machines / Modal / Firecracker), automated multi-cloud CI/CD deployment blueprints. |
 | **Phase 7** | Interactive Human-in-the-Loop | 📋 **Planned** | Mid-flight user prompt injection, step-by-step destructive action approvals, interactive terminal attach over WebSocket. |
 | **Phase 8** | Semantic Code Intelligence & LSP | 📋 **Planned** | Tree-sitter AST symbol graphs, vector embeddings for large repository indexing, real-time language server diagnostics. |
 
@@ -25,9 +26,9 @@
 ### Phase 0: Foundation, Persistence & Ephemeral Sandbox Hardening
 - [x] **Asynchronous Persistence Layer**: SQLAlchemy 2.0 async engine with `asyncpg` connection pooling (`pool_size=20`, `max_overflow=10`, `pool_pre_ping=True`).
 - [x] **Alembic Migrations**: Relational schema migrations for `users`, `user_credentials`, `tasks`, and `task_events`.
-- [x] **Docker Sandbox Hardening**: Strict Linux cgroups isolation (`mem_limit="1g"`, `nano_cpus=2_000_000_000`, `pids_limit=256`, `cap_drop=["ALL"]`, `security_opt=["no-new-privileges:true"]`).
+- [x] **Docker Sandbox Hardening**: cgroup limits in Docker mode (`mem_limit="1g"`, `nano_cpus=2_000_000_000`, `pids_limit=256`, `cap_drop=["ALL"]`, `security_opt=["no-new-privileges:true"]`). Production (Render) has no Docker daemon and uses SubprocessWorkspace, which has no resource caps.
 - [x] **Execution Timeout Watchdog**: Per-command execution wrapper (`timeout 300 bash -c ...`) preventing runaway or hanging processes.
-- [x] **Transient Git Authentication**: Token injection via transient `http.extraheader` flags without writing credentials into `.git/config`.
+- [x] **Token-Safe Git**: Clone and push run outside the agent's user with the token passed via `GIT_CONFIG_*` env; the push replays the agent's patch onto a fresh clone.
 - [x] **Pre-built Workspace Image**: Custom Dockerfile (`backend/Dockerfile.workspace`) with pre-installed build tools and runtime dependencies.
 
 ### Phase 1: Safe Single-Agent Reasoning & Patch Generation
@@ -69,14 +70,27 @@
 - [x] **3-Tab Task Inspector**: Terminal Flight Recorder, Patch Diff Viewer, and Visual Preview Gallery with high-resolution Lightbox modal.
 - [x] **Autonomous SWE Evaluation Suite**: Benchmark runner (`backend/evals/eval_runner.py`) executing synthetic test cases and live filesystem workspace validations.
 
+### Hardening (2026-10)
+- [x] **Security hotfixes**: Closed the auth bypass, scoped task APIs to their owner, authenticated internal worker events.
+- [x] **Workspace lifecycle**: 30-minute task time limit; workspaces are torn down reliably, and a reaper cleans up after crashes.
+- [x] **Secrets**: `SecretStr` settings; tests never load the real `.env`.
+- [x] **Sandbox isolation**: Per-task UID and scrubbed env in SubprocessWorkspace; GitHub token kept out of the agent's reach.
+- [x] **Streams & observability**: WebSocket streams survive disconnects; structured logs with request/task context; eval harness runs the real agent loop.
+- [x] **Same-site auth**: Session cookie kept first-party via the `/api` proxy; WebSockets use 60 s stream tickets.
+- [x] **CI quality gates**: GitHub Actions running ruff, pytest with a 78% coverage floor, eslint, `tsc`, vitest and `next build`.
+- [x] **Anonymous task guard**: Repo tasks require sign-in, the server `GITHUB_TOKEN` is removed, protected branch names are rejected (422), first pushes only create new branches, and signed-out visitors share an hourly cap (`ANON_TASKS_PER_HOUR`).
+- [x] **Repo permissions**: Access is checked before running; without write access Nimbus pushes to a fork and opens the PR from it; PRs target the repo's default branch.
+- [x] **Follow-ups**: `POST /api/tasks/{id}/messages` continues the same task, branch and PR from the task's base commit and changes so far; retry keeps the branch and PR.
+
 ---
 
-## 🎯 Active Milestone: Phase 6
+## 🎯 Next Milestone: Phase 6
 
 ### Phase 6: Unified Workspace Provider & Cloud MicroVM Sandboxes
 - [ ] **`WorkspaceProvider` Protocol**: Formalize Python `typing.Protocol` / `abc.ABC` interface for all sandbox engines (`DockerWorkspace`, `SubprocessWorkspace`, `MicroVMWorkspace`).
 - [ ] **Cloud MicroVM Adapter**: Prototype Firecracker / Fly Machines / Modal backend for serverless on-demand containerless execution.
-- [ ] **Automated CI/CD Workflows**: GitHub Actions workflows for automated backend linting, pytest matrix, and Next.js bundle verification.
+- [x] **Automated CI Workflows**: `.github/workflows/ci.yml` (backend lint/tests/coverage, frontend lint/typecheck/tests/build).
+- [ ] **Resource & network limits in production**: SubprocessWorkspace has neither today.
 - [ ] **Infrastructure-as-Code & Blueprints**: Refined `render.yaml` and Railway deployment templates with managed secret injection.
 
 ---
@@ -84,7 +98,7 @@
 ## 📋 Future Milestone Roadmap
 
 ### Phase 7: Interactive Human-in-the-Loop & Execution Controls
-- [ ] **Mid-Flight Steering**: Allow users to inject follow-up instructions and corrections while the agent loop is running.
+- [ ] **Mid-Flight Steering**: Allow users to inject corrections while the agent loop is running (follow-ups after a run finishes already work).
 - [ ] **Policy & Destructive Action Approvals**: Pause execution and request user approval for high-risk operations (e.g. database schema drops, mass file deletions, non-standard port listeners).
 - [ ] **Interactive Terminal Gateway**: Provide an optional real-time xterm.js interactive shell attach for developer manual intervention.
 
@@ -106,18 +120,8 @@
 
 ---
 
-## 🧪 Test Suite & Verification Matrix
+## 🧪 Test Suite & Verification
 
-- **Backend Pytest Suite**: **46/46 tests passing** (`uv run pytest`)
-  - `test_api.py`: 8 tests (Task CRUD, REST status, rate limiting, cancellation, retries)
-  - `test_auth.py`: 8 tests (GitHub OAuth 2.0 flow, JWT encoding/decoding, session cookies)
-  - `test_browser.py`: 3 tests (Screenshot capture, binary base64 extraction, visual API)
-  - `test_credentials.py`: 5 tests (Fernet encryption/decryption, credential vault CRUD)
-  - `test_evals.py`: 2 tests (Synthetic SWE benchmark, live workspace evaluation)
-  - `test_github_client.py`: 3 tests (Repo URL parser, Draft PR creation, branch push)
-  - `test_llm.py`: 4 tests (3-tier fallback, Groq truncation, stall watchdog, backoff)
-  - `test_scaling.py`: 4 tests (Redis Event Bus Pub/Sub & Streams, WebSocket auth)
-  - `test_worker.py`: 4 tests (Agent reasoning loop, git diff extraction, task execution)
-  - `test_workspace.py`: 5 tests (Docker container lifecycle, subprocess fallback, cgroups)
-- **Frontend Turbopack Build**: **0 errors** across all static and dynamic routes (`npm run build`).
-- **SWE Agent Evaluation Benchmark**: **100% pass rate** across synthetic and live filesystem test challenges.
+- **Backend**: `cd backend && uv run pytest --cov` (all mocked; no DB, Redis, Docker or LLM calls). CI fails below 78% coverage.
+- **Frontend**: `npm run lint`, `npm run typecheck`, `npm test` (vitest), `npm run build`.
+- **Agent eval**: `uv run python evals/eval_runner.py` runs the real agent loop on fixture repos and **uses your LLM keys**; `tests/test_evals.py` covers the harness with a scripted LLM.

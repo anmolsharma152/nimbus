@@ -28,27 +28,29 @@ This guide walks through deploying the complete Nimbus autonomous agent platform
              [ Worker: Render / Railway Background Worker (arq) ]
                                      │
                                      ▼
-                     [ Ephemeral Sandboxes (Docker / microVMs) ]
+      [ Ephemeral workspaces: SubprocessWorkspace on Render (no Docker daemon) ]
 ```
 
 ---
 
 ## Deployment Pathway 1: 1-Click Render Blueprint (Recommended)
 
-Render allows you to provision the entire backend stack (FastAPI Web Service + arq Background Worker + PostgreSQL + Redis) from the included [`render.yaml`](../render.yaml).
+Render provisions the backend from the included [`render.yaml`](../render.yaml): one Docker web service that runs both the API and the `arq` worker, plus a PostgreSQL database. Redis is not in the blueprint; use Upstash (see below) and paste its URL.
 
 ### Steps:
 1. Log in to your [Render Dashboard](https://dashboard.render.com).
 2. Click **New +** → **Blueprint**.
 3. Connect your GitHub repository: `anmolsharma152/nimbus`.
-4. Render will detect [`render.yaml`](../render.yaml) and automatically configure:
-   * **`nimbus-api`** (FastAPI Web Service)
-   * **`nimbus-worker`** (Background Worker)
-   * **`nimbus-db`** (PostgreSQL 16)
-   * **`nimbus-redis`** (Redis instance)
-5. Fill in the prompted secret environment variables:
-   * `GEMINI_API_KEY`: Your Google Gemini API Key.
-   * `GITHUB_TOKEN`: (Optional) GitHub Personal Access Token for PR creation.
+4. Render will detect [`render.yaml`](../render.yaml) and configure:
+   * **`nimbus-api`**: `backend/entrypoint.sh` runs `alembic upgrade head`, starts the `arq` worker in the background, then Uvicorn.
+   * **`nimbus-db`** (PostgreSQL)
+5. Fill in the prompted values, then add the rest under the service's **Environment** tab:
+   * `REDIS_URL`: your Upstash `rediss://` URL.
+   * `GEMINI_API_KEY` (and/or `GROQ_API_KEY`, `OPENROUTER_API_KEY`): at least one LLM key, unless every user brings their own.
+   * `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`: the GitHub OAuth app. Sign-in is required for repo tasks.
+   * `JWT_SECRET_KEY`: a long random value. It also derives the key that encrypts stored user credentials, so changing it later makes them unreadable.
+   * Optional: `ANON_TASKS_PER_HOUR` (default 10), the hourly task budget shared by signed-out visitors.
+   * There is no server-wide GitHub token. If an old `GITHUB_TOKEN` variable is still set, it is ignored and can be deleted.
 6. Click **Apply**.
 7. Copy your public `nimbus-api` URL (e.g., `https://nimbus-api-l32h.onrender.com`).
 
@@ -70,7 +72,7 @@ If you prefer serverless infrastructure with generous zero-cost free tiers:
 
 ### 3. Backend (Render or Railway)
 1. Create a Web Service pointing to `backend/Dockerfile`.
-2. Add environment variables: `DATABASE_URL`, `REDIS_URL`, `GEMINI_API_KEY`.
+2. Add environment variables: `DATABASE_URL`, `REDIS_URL`, an LLM key, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `JWT_SECRET_KEY`, `FRONTEND_URL`, `OAUTH_REDIRECT_BASE_URL`.
 3. Start command: `/bin/bash /app/entrypoint.sh`.
 
 ---
@@ -92,3 +94,13 @@ Once your backend is live and you have your public API URL (e.g. `https://nimbus
 5. Click **Deploy**.
 
 Your live frontend at **`https://nimbusagent.vercel.app/`** communicates seamlessly with your cloud control plane!
+
+---
+
+## Database migrations
+
+`entrypoint.sh` runs `alembic upgrade head` on every start but ignores a failure, and `main.lifespan`
+also creates missing tables and adds missing columns. A database that was created by `lifespan`
+rather than Alembic has no `alembic_version` row, so its upgrade is expected to fail (the first
+migration tries to create existing tables) and only the `lifespan` path applies. Run `uv run alembic stamp head` once against such a database so later migrations
+apply normally.

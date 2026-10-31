@@ -13,9 +13,9 @@
 [![Next.js 16](https://img.shields.io/badge/Next.js-16.3%20(Turbopack)-black?logo=next.js&logoColor=white)](https://nextjs.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%20(asyncpg)-336791?logo=postgresql&logoColor=white)](https://postgresql.org)
 [![Redis](https://img.shields.io/badge/Redis-7%20(arq)-DC382D?logo=redis&logoColor=white)](https://redis.io)
-[![Docker](https://img.shields.io/badge/Docker-Sandboxed%20microVM-2496ED?logo=docker&logoColor=white)](https://docker.com)
+[![Docker](https://img.shields.io/badge/Sandbox-Docker%20%2F%20subprocess-2496ED?logo=docker&logoColor=white)](docs/security.md)
 [![3-Tier LLM](https://img.shields.io/badge/LLM-3--Tier%20Multi--LLM%20Routing-8E75B2?logo=google&logoColor=white)](https://ai.google.dev)
-[![Tests](https://img.shields.io/badge/Tests-46%2F46%20Passing-brightgreen?logo=pytest&logoColor=white)](#testing--evals-benchmark)
+[![Tests](https://img.shields.io/badge/Tests-pytest%20%2B%20vitest%20in%20CI-brightgreen?logo=pytest&logoColor=white)](#-testing--evals-benchmark)
 
 <p align="center">
   <b>🌐 <a href="https://nimbusagent.vercel.app/">Live Web App</a></b> &nbsp;|&nbsp;
@@ -43,23 +43,24 @@ sequenceDiagram
     participant DB as PostgreSQL (Asyncpg)
     participant Redis as Redis / arq Queue
     participant Worker as arq Background Worker
-    participant LLM as Google Gemini 2.5 (Agent Loop)
-    participant Sandbox as Docker Sandbox (/workspace/repo)
+    participant LLM as 3-Tier LLM (Gemini → Groq → OpenRouter)
+    participant Sandbox as Workspace Sandbox (Docker / subprocess)
     participant GitHub as GitHub REST API
 
-    Dev->>UI: Submit Task Prompt + Target Repo URL
-    UI->>API: POST /api/tasks
+    Dev->>UI: Sign in with GitHub, submit Task Prompt + Target Repo
+    UI->>API: POST /api/tasks (repo tasks require sign-in)
     API->>DB: Insert Task record (status: PENDING)
     API->>Redis: Enqueue run_agent_loop(task_id, prompt, repo_url)
     API-->>UI: Return task_id
-    UI->>API: Open WebSocket /ws/tasks/{task_id}
+    UI->>API: Open WebSocket /ws/tasks/{task_id}?ticket=...
     
     Redis->>Worker: Dequeue task job
     Worker->>DB: Update Task (status: RUNNING)
     Worker->>API: Broadcast status: running
     API-->>UI: Stream status badge: RUNNING
     
-    Worker->>Sandbox: Provision ephemeral container & git clone
+    Worker->>GitHub: GET /repos/{owner}/{repo} (check access as the user)
+    Worker->>Sandbox: Provision ephemeral workspace & git clone
     Worker->>Sandbox: git checkout -b nimbus/task-<task_id>
     
     loop Agent Execution Loop (up to 20 turns)
@@ -75,8 +76,8 @@ sequenceDiagram
     
     Worker->>Sandbox: git add -N . && git diff HEAD
     Sandbox-->>Worker: Capture patch_diff
-    Worker->>Sandbox: Commit changes & git push branch
-    Worker->>GitHub: POST /repos/{owner}/{repo}/pulls (Draft PR)
+    Worker->>Sandbox: Replay patch on fresh clone & push (to a fork if no write access)
+    Worker->>GitHub: POST /repos/{owner}/{repo}/pulls (Draft PR into the default branch)
     GitHub-->>Worker: Return PR URL
     Worker->>DB: Save patch_diff, pr_url, status: COMPLETED
     Worker->>API: Broadcast status: completed + PR link
@@ -101,12 +102,12 @@ graph TD
         DB[("PostgreSQL 16\n(Tasks & Append-Only Events)")]
         Redis[("Redis 7\n(arq Queue + Pub/Sub)")]
         Worker["arq Background Worker\n(Non-blocking Async Loop)"]
-        Secrets["Secret Vault\n(GEMINI_API_KEY, GITHUB_TOKEN)"]
-        LLM["Google Gemini 2.5\n(Structured Reasoning)"]
+        Secrets["Encrypted Vault\n(user OAuth tokens, BYOK keys)"]
+        LLM["3-Tier LLM Router\n(Gemini → Groq → OpenRouter)"]
     end
 
-    subgraph Untrusted Zone ["⚠️ Untrusted Ephemeral Sandbox (Docker / microVM)"]
-        Container["Disposable Container Sandbox\n• Memory Cap: 1 GB\n• CPU Limit: 2.0 Cores\n• PIDs Limit: 256\n• Cap Drop: ALL\n• No New Privileges\n• Timeout: 300s"]
+    subgraph Untrusted Zone ["⚠️ Untrusted Ephemeral Sandbox"]
+        Container["Disposable Workspace\nDocker: 1 GB / 2 CPU / 256 PIDs, cap drop ALL\nSubprocess (prod): per-task UID, scrubbed env\nCommand timeout: 300s"]
         Repo["/workspace/repo\nCloned Repository Code"]
         Tools["Sandboxed Toolchain\n(git, python3, build-essential)"]
     end
@@ -140,9 +141,9 @@ stateDiagram-v2
     PENDING --> RUNNING: Worker dequeues from Redis
     
     state RUNNING {
-        [*] --> WorkspaceInit: Provision Ephemeral Docker Container
-        WorkspaceInit --> GitClone: Clone repo & create branch nimbus/task-<id>
-        GitClone --> ReasoningLoop: Initialize Gemini 2.5 Agent
+        [*] --> WorkspaceInit: Check repo access & provision workspace
+        WorkspaceInit --> GitClone: Clone repo & create branch nimbus/task-<id> (follow-ups restore earlier changes)
+        GitClone --> ReasoningLoop: Initialize 3-tier LLM agent
         
         state ReasoningLoop {
             PlanAction --> EmittingCommand: Generate structured JSON
@@ -153,13 +154,16 @@ stateDiagram-v2
         
         ReasoningLoop --> DiffExtraction: Agent signals completion
         DiffExtraction --> CommitAndPush: Commit changes & push branch
-        CommitAndPush --> OpenDraftPR: Create GitHub Draft PR
+        CommitAndPush --> OpenDraftPR: Create Draft PR (or update the existing one)
     }
 
     RUNNING --> COMPLETED: Success (Patch captured & PR opened)
     RUNNING --> FAILED: Agent exception / syntax failure
     PENDING --> CANCELLED: User cancels task
     RUNNING --> CANCELLED: User cancels task
+    COMPLETED --> PENDING: Follow-up message or retry
+    FAILED --> PENDING: Follow-up message or retry
+    CANCELLED --> PENDING: Follow-up message or retry
     
     COMPLETED --> [*]
     FAILED --> [*]
@@ -202,17 +206,23 @@ The Next.js 16 frontend provides a modern glassmorphic split-pane dashboard:
 * **⚡ 100% Non-Blocking Asynchronous Core**:
   * FastAPI with `asyncpg` connection pooling (`pool_size=20`, `max_overflow=10`, `pool_pre_ping=True`).
   * Asynchronous LLM reasoning using Google GenAI's native async client (`client.aio.chats`).
-  * Asynchronous Docker container execution wrappers (`asyncio.to_thread`) preventing I/O starvation.
-* **🛡️ Zero-Trust Workspace Isolation**:
-  * Ephemeral Docker sandbox per task with hard resource limits (`1 GB` RAM, `2.0` CPUs, PID cap `256`, dropped capabilities, and strict execution timeouts).
-  * Secrets are kept outside the sandbox—GitHub authentication is injected via transient basic headers without writing credentials into `.git/config`.
+  * Blocking Docker and subprocess calls run in `asyncio.to_thread` so they never stall the event loop.
+* **🛡️ Workspace Isolation**:
+  * One disposable workspace per task. With Docker: `1 GB` RAM, `2.0` CPUs, `256` PIDs, dropped capabilities. In production (Render, no Docker daemon): a per-task unprivileged UID with a scrubbed environment, without resource caps. See [docs/security.md](docs/security.md).
+  * The GitHub token never enters the workspace: clone and push run outside the agent's user, and the push replays the agent's patch onto a fresh clone.
+* **🔐 Safe Repo Access**:
+  * Repo tasks require GitHub sign-in and use only the user's own token; there is no server-wide token.
+  * Protected branch names are rejected, and pushes use `--force-with-lease`, so Nimbus never touches a branch it didn't create.
+  * Access is checked before a run; without write access, changes go to a fork in the user's account.
 * **🔄 Append-Only Event Sourcing & Instant Replay**:
   * Every log, bash command, terminal output, and status change is persisted in PostgreSQL as a durable `TaskEvent`.
   * Interrupted browser sessions reconnect to `/ws/tasks/{id}` and instantly receive full historical playback.
 * **🛑 Real-Time Task Cancellation**:
   * `POST /api/tasks/{task_id}/cancel` endpoint instantly signals running workers and cleans up Docker resources.
 * **🚀 Automated GitHub Draft PRs**:
-  * Automatically provisions feature branches (`nimbus/task-<task_id>`), commits changes, pushes to remote, and creates Draft Pull Requests with patch diff previews.
+  * Automatically provisions feature branches (`nimbus/task-<task_id>`), commits changes, pushes, and opens Draft Pull Requests into the repo's default branch.
+* **💬 Follow-ups on the Same Task**:
+  * `POST /api/tasks/{id}/messages` continues a finished task from its changes so far and updates the same branch and PR.
 
 ---
 
@@ -226,12 +236,12 @@ Nimbus/
 │   │   ├── db.py             # SQLAlchemy 2.0 async engine & connection pool setup
 │   │   ├── github_client.py  # GitHub REST API client for Draft PRs & branch pushes
 │   │   ├── main.py           # FastAPI control plane, REST routes & WebSocket gateway
-│   │   ├── models.py         # SQLAlchemy relational models (Task, TaskEvent)
+│   │   ├── models.py         # SQLAlchemy models (User, UserCredential, Task, TaskEvent, TaskMessage)
 │   │   ├── settings.py       # Pydantic configuration & env variable schema
 │   │   ├── worker.py         # arq background worker & async Gemini agent loop
 │   │   └── workspace.py      # Ephemeral Docker workspace sandbox adapter
 │   ├── evals/                # Benchmark runner & automated eval suite
-│   ├── tests/                # 17 comprehensive unit & integration tests
+│   ├── tests/                # pytest suite (mocked; no DB, Redis, Docker or LLM calls)
 │   ├── Dockerfile.workspace  # Pre-built sandbox workspace container definition
 │   └── pyproject.toml        # uv package manager configuration
 ├── frontend/
@@ -241,11 +251,12 @@ Nimbus/
 │   │   └── tasks/[id]/       # Real-time streaming terminal & patch diff inspector
 │   └── package.json          # Next.js 16 + React 19 + TypeScript config
 ├── docs/
-│   ├── architecture.md       # Full architecture specification & sequence diagrams
-│   ├── roadmap.md            # Multi-phase milestone delivery roadmap
-│   └── security.md           # Security model & container trust boundaries
+│   ├── cloud_deployment.md   # Render / Neon / Upstash / Vercel deployment guide
+│   ├── roadmap.md            # Short roadmap: done and next
+│   └── security.md           # Security model: what is enforced and what isn't built yet
+├── ARCHITECTURE.md           # Architecture specification & sequence diagrams
 ├── TASKS.md                  # Project task tracker & milestone checklist
-├── PROJECT_STATE.md          # Up-to-date development status & technical audit
+├── AGENTS.md / CLAUDE.md     # Instructions for coding agents
 ├── docker-compose.yml        # Local multi-service infrastructure setup
 └── .env.example              # Environment variables template
 ```
@@ -270,9 +281,13 @@ Ensure `.env` contains:
 ```ini
 DATABASE_URL=postgresql+asyncpg://nimbus_user:nimbus_password@localhost:5432/nimbus_db
 REDIS_URL=redis://localhost:6379/0
-GEMINI_API_KEY=your_google_gemini_api_key
-GITHUB_TOKEN=your_github_token_for_prs  # Optional
+GEMINI_API_KEY=your_google_gemini_api_key   # or GROQ_API_KEY / OPENROUTER_API_KEY
+GITHUB_CLIENT_ID=your_oauth_app_client_id    # GitHub OAuth app: sign-in is required for repo tasks
+GITHUB_CLIENT_SECRET=your_oauth_app_client_secret
+JWT_SECRET_KEY=a_long_random_secret          # also derives the credential-vault key
 ```
+
+There is no server-wide GitHub token: repo tasks clone, push and open PRs with the signed-in user's own OAuth token (or a PAT they save in Settings).
 
 ### 3. Backend Setup
 
@@ -314,23 +329,7 @@ cd backend
 uv run pytest
 ```
 
-```text
-============================== test session starts ==============================
-collected 46 items
-
-tests/test_api.py ........                                               [ 17%]
-tests/test_auth.py ........                                              [ 34%]
-tests/test_browser.py ...                                                [ 41%]
-tests/test_credentials.py .....                                          [ 52%]
-tests/test_evals.py ..                                                   [ 56%]
-tests/test_github_client.py ...                                          [ 63%]
-tests/test_llm.py ....                                                   [ 71%]
-tests/test_scaling.py ....                                               [ 80%]
-tests/test_worker.py ....                                                [ 89%]
-tests/test_workspace.py .....                                            [100%]
-
-============================== 46 passed in 7.43s ==============================
-```
+Everything is mocked (no DB, Redis, Docker or LLM calls). CI also enforces a 78% coverage floor (`uv run pytest --cov`) and runs the frontend checks: `npm run lint`, `npm run typecheck`, `npm test`, `npm run build`.
 
 ### Running the Agent Evaluation
 
@@ -344,15 +343,9 @@ Runs the real agent loop against small fixture repos and scores each run with hi
 
 ---
 
-## 🗺️ Multi-Phase Roadmap Status
+## 🗺️ Roadmap
 
-| Phase | Milestone | Status | Key Deliverables |
-| :--- | :--- | :---: | :--- |
-| **Phase 0** | Foundation & Durable State | ✅ **Completed** | FastAPI, Postgres asyncpg, Alembic migrations, Redis arq queue, WebSocket gateway |
-| **Phase 1** | Safe Single-Agent Execution | ✅ **Completed** | Isolated Docker sandbox, async Gemini loop, git diff extraction, Next.js UI |
-| **Phase 2** | Multi-Tenant GitHub Workflow | ✅ **Completed** | Ephemeral token injection, branch isolation (`nimbus/task-<id>`), automated Draft PRs |
-| **Phase 3** | Product-Grade Scalability | 🔄 **In Progress** | Distributed Redis Pub/Sub, session reconnect replay, MicroVM provider interface |
-| **Phase 4** | Browser Automation & Cloud Deploy | 📋 **Planned** | Playwright visual verification, screenshot artifacts, production multi-cloud deploy |
+Phases 0–5 (agent loop, GitHub PRs, OAuth, vault, event fan-out, screenshots, evals) and a security/reliability hardening pass are done. Next up: the task-page UX, production workspace limits, and a microVM workspace provider. See [docs/roadmap.md](docs/roadmap.md) and [TASKS.md](TASKS.md).
 
 ---
 
